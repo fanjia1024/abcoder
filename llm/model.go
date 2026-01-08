@@ -18,16 +18,26 @@ package llm
 
 import (
 	"context"
+	"time"
 
 	"github.com/cloudwego/eino-ext/components/model/ark"
 	"github.com/cloudwego/eino-ext/components/model/claude"
 	"github.com/cloudwego/eino-ext/components/model/ollama"
 	"github.com/cloudwego/eino-ext/components/model/openai"
+	"github.com/cloudwego/eino-ext/components/model/qwen"
 )
 
 func NewChatModel(m ModelConfig) (model ChatModel) {
 	if m.MaxTokens == 0 {
 		m.MaxTokens = 16 * 1024
+	}
+	// Set default timeout to 600 seconds if not specified
+	if m.Timeout == 0 {
+		m.Timeout = 600 * time.Second
+	}
+	// Set default retries to 3 if not specified
+	if m.Retries == 0 {
+		m.Retries = 3
 	}
 	var err error
 	switch m.APIType {
@@ -49,6 +59,43 @@ func NewChatModel(m ModelConfig) (model ChatModel) {
 			Model:       m.ModelName,
 			Temperature: m.Temperature,
 			MaxTokens:   &m.MaxTokens,
+			Timeout:     m.Timeout,
+		})
+		if err != nil {
+			panic(err)
+		}
+		return model
+	case ModelTypeDashScope:
+		// DashScope (Qwen) uses OpenAI-compatible API
+		baseURL := m.BaseURL
+		if baseURL == "" {
+			baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+		}
+		model, err = qwen.NewChatModel(context.Background(), &qwen.ChatModelConfig{
+			BaseURL:     baseURL,
+			APIKey:      m.APIKey,
+			Model:       m.ModelName,
+			Temperature: m.Temperature,
+			MaxTokens:   &m.MaxTokens,
+			Timeout:     m.Timeout,
+		})
+		if err != nil {
+			panic(err)
+		}
+		return model
+	case ModelTypeDeepSeek:
+		// DeepSeek uses OpenAI-compatible API
+		baseURL := m.BaseURL
+		if baseURL == "" {
+			baseURL = "https://api.deepseek.com"
+		}
+		model, err = openai.NewChatModel(context.Background(), &openai.ChatModelConfig{
+			BaseURL:     baseURL,
+			APIKey:      m.APIKey,
+			Model:       m.ModelName,
+			Temperature: m.Temperature,
+			MaxTokens:   &m.MaxTokens,
+			Timeout:     m.Timeout,
 		})
 		if err != nil {
 			panic(err)

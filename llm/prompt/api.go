@@ -92,3 +92,6 @@ func NewTextPrompt(content string) Prompt {
 
 //go:embed analyzer.md
 var PromptAnalyzeRepo string
+
+//go:embed translator.md
+var PromptTranslator string

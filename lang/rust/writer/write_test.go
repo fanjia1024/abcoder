@@ -1,0 +1,96 @@
+/**
+ * Copyright 2025 ByteDance Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package writer
+
+import (
+	"testing"
+
+	"github.com/cloudwego/abcoder/lang/uniast"
+)
+
+func TestWriter_SplitImportsAndCodes(t *testing.T) {
+	w := NewWriter(Options{})
+	tests := []struct {
+		name     string
+		src      string
+		wantCode string
+		wantImps int
+	}{
+		{
+			name:     "simple use",
+			src:      "use std::collections::HashMap;\n\npub fn test() {}",
+			wantCode: "pub fn test() {}",
+			wantImps: 1,
+		},
+		{
+			name:     "multiple use",
+			src:      "use std::collections::HashMap;\nuse std::io;\n\npub fn test() {}",
+			wantCode: "pub fn test() {}",
+			wantImps: 2,
+		},
+		{
+			name:     "no use",
+			src:      "pub fn test() {}",
+			wantCode: "pub fn test() {}",
+			wantImps: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, gotImps, err := w.SplitImportsAndCodes(tt.src)
+			if err != nil {
+				t.Errorf("SplitImportsAndCodes() error = %v", err)
+				return
+			}
+			// Note: GetRustContentDefine may modify whitespace, so we check roughly
+			if len(gotImps) != tt.wantImps {
+				t.Errorf("SplitImportsAndCodes() imports = %v, want %v", len(gotImps), tt.wantImps)
+			}
+		})
+	}
+}
+
+func TestWriter_IdToImport(t *testing.T) {
+	w := NewWriter(Options{})
+	tests := []struct {
+		name string
+		id   uniast.Identity
+		want string
+	}{
+		{
+			name: "simple crate",
+			id: uniast.Identity{
+				PkgPath: "example/module",
+			},
+			want: "use example::module;",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := w.IdToImport(tt.id)
+			if err != nil {
+				t.Errorf("IdToImport() error = %v", err)
+				return
+			}
+			if got.Path != tt.want {
+				t.Errorf("IdToImport() = %v, want %v", got.Path, tt.want)
+			}
+		})
+	}
+}

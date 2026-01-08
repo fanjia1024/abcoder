@@ -19,6 +19,7 @@ package llm
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/abcoder/llm/prompt"
 	"github.com/cloudwego/abcoder/llm/tool"
@@ -36,7 +37,9 @@ type ModelConfig struct {
 	ModelName   string    `json:"model_name"` // the endpoint of the model, like `claude-opus-4-20250514`
 	Temperature *float32  `json:"temperature"`
 	// TopP        *float32  `json:"top_p"`
-	MaxTokens int `json:"max_tokens"`
+	MaxTokens int           `json:"max_tokens"`
+	Timeout   time.Duration `json:"timeout"` // HTTP request timeout, default: 600s
+	Retries   int           `json:"retries"` // Number of retries on failure, default: 3
 }
 
 type ModelType string
@@ -45,22 +48,28 @@ func NewModelType(t string) ModelType {
 	switch strings.ToLower(t) {
 	case "ollama":
 		return ModelTypeOllama
-	case "ark":
+	case "ark", "doubao":
 		return ModelTypeARK
-	case "openai":
+	case "openai", "gpt":
 		return ModelTypeOpenAI
-	case "claude":
+	case "claude", "anthropic":
 		return ModelTypeClaude
+	case "dashscope", "qwen", "tongyi":
+		return ModelTypeDashScope
+	case "deepseek":
+		return ModelTypeDeepSeek
 	}
 	return ModelTypeUnknown
 }
 
 const (
-	ModelTypeUnknown ModelType = ""
-	ModelTypeOllama  ModelType = "ollama"
-	ModelTypeARK     ModelType = "ark"
-	ModelTypeOpenAI  ModelType = "openai" // Fixed typo in constant name
-	ModelTypeClaude  ModelType = "claude"
+	ModelTypeUnknown   ModelType = ""
+	ModelTypeOllama    ModelType = "ollama"
+	ModelTypeARK       ModelType = "ark"
+	ModelTypeOpenAI    ModelType = "openai" // Fixed typo in constant name
+	ModelTypeClaude    ModelType = "claude"
+	ModelTypeDashScope ModelType = "dashscope" // 阿里云 DashScope (通义千问)
+	ModelTypeDeepSeek  ModelType = "deepseek"  // DeepSeek
 )
 
 type AgentConfig struct {

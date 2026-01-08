@@ -18,6 +18,9 @@ package llm
 
 import (
 	"context"
+	"fmt"
+	"strings"
+	"time"
 
 	"github.com/cloudwego/abcoder/internal/utils"
 	"github.com/cloudwego/abcoder/llm/log"
@@ -32,13 +35,17 @@ import (
 var _ Generator = (*ReactAgent)(nil)
 
 type ReactAgent struct {
-	opts ReactAgentOptions
+	opts     ReactAgentOptions
 	*react.Agent
+	retries int           // Number of retries on failure
+	timeout time.Duration // Request timeout
 }
 
 type ReactAgentOptions struct {
 	SysPrompt prompt.Prompt `json:"-"`
 	*react.AgentConfig
+	Retries int           `json:"retries"` // Number of retries, default: 3
+	Timeout time.Duration `json:"timeout"` // Request timeout, default: 600s
 }
 
 func NewReactAgent(name string, opts ReactAgentOptions) *ReactAgent {
@@ -49,9 +56,19 @@ func NewReactAgent(name string, opts ReactAgentOptions) *ReactAgent {
 	if err != nil {
 		panic(err)
 	}
+	retries := opts.Retries
+	if retries == 0 {
+		retries = 3 // Default: 3 retries
+	}
+	timeout := opts.Timeout
+	if timeout == 0 {
+		timeout = 600 * time.Second // Default: 600 seconds
+	}
 	return &ReactAgent{
-		opts:  opts,
-		Agent: agent,
+		opts:    opts,
+		Agent:   agent,
+		retries: retries,
+		timeout: timeout,
 	}
 }
 
@@ -81,11 +98,51 @@ func (p *ReactAgent) Call(ctx context.Context, input string) (string, error) {
 	inputMsg := schema.UserMessage(input)
 	log.Debug("[User] %s", input)
 	inputMsgs := []*schema.Message{inputMsg}
-	out, err := p.Generate(ctx, inputMsgs, agent.WithComposeOptions(compose.WithCallbacks(CallbackHandler{})))
-	if err != nil {
-		return "", utils.WrapError(err, "ReactAgent RoundTrip error")
+
+	var lastErr error
+	for attempt := 0; attempt <= p.retries; attempt++ {
+		if attempt > 0 {
+			log.Info("Retrying LLM call (attempt %d/%d)...", attempt+1, p.retries+1)
+			// Exponential backoff: wait 1s, 2s, 4s...
+			waitTime := time.Duration(1<<uint(attempt-1)) * time.Second
+			if waitTime > 10*time.Second {
+				waitTime = 10 * time.Second // Cap at 10 seconds
+			}
+			time.Sleep(waitTime)
+		}
+
+		// Create context with timeout for this attempt
+		attemptCtx, cancel := context.WithTimeout(ctx, p.timeout)
+		defer cancel()
+
+		out, err := p.Generate(attemptCtx, inputMsgs, agent.WithComposeOptions(compose.WithCallbacks(CallbackHandler{})))
+		if err == nil {
+			return out.Content, nil
+		}
+
+		lastErr = err
+		errStr := err.Error()
+
+		// Check if error is retryable (timeout, connection reset, etc.)
+		isRetryable := strings.Contains(errStr, "timeout") ||
+			strings.Contains(errStr, "connection reset") ||
+			strings.Contains(errStr, "connection refused") ||
+			strings.Contains(errStr, "operation timed out") ||
+			strings.Contains(errStr, "context deadline exceeded") ||
+			strings.Contains(errStr, "read tcp") ||
+			strings.Contains(errStr, "write tcp")
+
+		if !isRetryable {
+			// Non-retryable error, return immediately
+			log.Error("Non-retryable error occurred: %v", err)
+			return "", utils.WrapError(err, "ReactAgent RoundTrip error")
+		}
+
+		log.Info("Retryable error occurred (attempt %d/%d): %v", attempt+1, p.retries+1, err)
 	}
-	return out.Content, nil
+
+	// All retries exhausted
+	return "", utils.WrapError(fmt.Errorf("failed after %d retries: %w", p.retries+1, lastErr), "ReactAgent RoundTrip error")
 }
 
 /*

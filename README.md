@@ -85,12 +85,59 @@ see [UniAST Specification](docs/uniast-zh.md)
 - Try to use [the recommended prompt](llm/prompt/analyzer.md) and combine planning/memory tools like [sequential-thinking](https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking) in your AI agent.
 
 
+## Translate Code Between Languages
+
+ABCoder can translate code from one language to another using LLM. Currently supports Java to Go translation:
+
+```bash
+export API_TYPE='{openai|ollama|ark|claude|dashscope|deepseek}' 
+export API_KEY='{your-api-key}' 
+export MODEL_NAME='{model-endpoint}' 
+abcoder translate java go {java-project-path} -o {output-dir}
+```
+
+For example, using Claude:
+
+```bash
+export API_TYPE='claude'
+export API_KEY='your-anthropic-api-key'
+export MODEL_NAME='claude-sonnet-4-20250514'
+abcoder translate java go ./my-java-project -o ./my-go-project
+```
+
+Using Qwen (DashScope):
+
+```bash
+export API_TYPE='dashscope'
+export API_KEY='your-dashscope-api-key'
+export MODEL_NAME='qwen-max'
+abcoder translate java go ./my-java-project -o ./my-go-project
+```
+
+Using DeepSeek:
+
+```bash
+export API_TYPE='deepseek'
+export API_KEY='your-deepseek-api-key'
+export MODEL_NAME='deepseek-chat'
+abcoder translate java go ./my-java-project -o ./my-go-project
+```
+
+**Supported LLM Providers:**
+- OpenAI (GPT-4o, GPT-4, etc.)
+- Claude (Claude 3.5/4, etc.)
+- ARK/Doubao (火山引擎/豆包)
+- DashScope/Qwen (阿里云/通义千问)
+- DeepSeek
+- Ollama (local models)
+- Any OpenAI-compatible API (via `BASE_URL`)
+
 ## Use ABCoder as an Agent (WIP)
 
 You can also use ABCoder as a command-line Agent like:
 
 ```bash
-export API_TYPE='{openai|ollama|ark|claude}' 
+export API_TYPE='{openai|ollama|ark|claude|dashscope|deepseek}' 
 export API_KEY='{your-api-key}' 
 export MODEL_NAME='{model-endpoint}' 
 abcoder agent {the-AST-directory}
