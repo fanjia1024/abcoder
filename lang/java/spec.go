@@ -15,6 +15,7 @@
 package java
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -70,6 +71,16 @@ func (c *JavaSpec) FileImports(content []byte) ([]uniast.Import, error) {
 
 func (c *JavaSpec) WorkSpace(root string) (map[string]string, error) {
 	rets := javaparser.GetModuleMap(c.rootMod)
+	// If no modules found (e.g., no pom.xml), create a default module
+	if len(rets) == 0 {
+		modName := filepath.Base(root)
+		if modName == "" || modName == "." {
+			modName = root
+		}
+		// Format as Maven coordinates: groupId:artifactId:version
+		defaultModName := fmt.Sprintf("com.example:%s:1.0.0", modName)
+		rets[defaultModName] = root
+	}
 	return rets, nil
 }
 
@@ -100,6 +111,20 @@ func (c *JavaSpec) NameSpace(path string, file *uniast.File) (string, string, er
 	if modInfo != nil {
 		modName = modInfo.Coordinates
 	}
+
+	// If no module found (e.g., no pom.xml), use repo name as default module
+	if modName == "" {
+		// Use the base name of the repo directory as the module name
+		modName = filepath.Base(c.repo)
+		if modName == "" || modName == "." {
+			// Fallback: use full repo path as module name
+			modName = c.repo
+		}
+		// Format as Maven coordinates: groupId:artifactId:version
+		// For simple projects, use a default format
+		modName = fmt.Sprintf("com.example:%s:1.0.0", modName)
+	}
+
 	return modName, file.Package, nil
 }
 
