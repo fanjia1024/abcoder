@@ -41,19 +41,42 @@ func TestGetGoType(t *testing.T) {
 }
 
 func TestConvertJavaPackageToGoModule(t *testing.T) {
+	// ConvertJavaPackageToGoModule returns the last segment for flat package structure
 	tests := []struct {
 		javaPackage string
 		expected    string
 	}{
-		{"com.example.project", "github.com/example/project"},
-		{"org.apache.commons", "github.com/apache/commons"},
-		{"java.lang", "java/lang"},
+		{"com.example.project", "project"},
+		{"org.apache.commons", "commons"},
+		{"java.lang", "lang"},
+		{"com.example.model", "model"},
+		{"service", "service"},
 	}
 
 	for _, tt := range tests {
 		result := ConvertJavaPackageToGoModule(tt.javaPackage)
 		if result != tt.expected {
 			t.Errorf("ConvertJavaPackageToGoModule(%q) = %q, want %q", tt.javaPackage, result, tt.expected)
+		}
+	}
+}
+
+func TestGetGoModuleNameFromGroupId(t *testing.T) {
+	// GetGoModuleNameFromGroupId converts groupId to Go module name
+	tests := []struct {
+		groupId  string
+		expected string
+	}{
+		{"com.example.test", "example.com/test"},
+		{"com.haier.ai.gencode", "haier.com/ai/gencode"},
+		{"com.example", "example.com"},
+		{"org.apache", "org/apache"}, // Non-com patterns are joined with slashes
+	}
+
+	for _, tt := range tests {
+		result := GetGoModuleNameFromGroupId(tt.groupId)
+		if result != tt.expected {
+			t.Errorf("GetGoModuleNameFromGroupId(%q) = %q, want %q", tt.groupId, result, tt.expected)
 		}
 	}
 }

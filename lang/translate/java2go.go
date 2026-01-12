@@ -68,8 +68,9 @@ func convertJavaFilePathToGo(javaPath string) string {
 	return base
 }
 
-// TranslateOptions contains options for Java to Go translation
-type TranslateOptions struct {
+// Java2GoOptions contains options for Java to Go translation (legacy)
+// Deprecated: Use TranslateOptions with LLMTranslator for new code
+type Java2GoOptions struct {
 	GoModuleName string // Target Go module name (e.g., github.com/example/project)
 	OutputDir    string // Output directory for Go code
 }
@@ -85,9 +86,10 @@ func extractGroupIdFromModuleName(modName string) string {
 	return modName
 }
 
-// Translate converts a Java UniAST Repository to Go UniAST Repository
+// TranslateJava2Go converts a Java UniAST Repository to Go UniAST Repository
 // This function merges all Java modules into a single Go module with flat package structure
-func Translate(ctx context.Context, javaRepo *uniast.Repository, opts TranslateOptions) (*uniast.Repository, error) {
+// Deprecated: Use Translate with LLMTranslator for new code
+func TranslateJava2Go(ctx context.Context, javaRepo *uniast.Repository, opts Java2GoOptions) (*uniast.Repository, error) {
 	if javaRepo == nil {
 		return nil, fmt.Errorf("java repository is nil")
 	}

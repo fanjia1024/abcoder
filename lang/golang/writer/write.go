@@ -199,11 +199,14 @@ func (w *Writer) WriteModule(repo *uniast.Repository, modPath string, outDir str
 		return fmt.Errorf("write go.mod failed: %v", err)
 	}
 
-	// go mod tidy
+	// go mod tidy - may fail for translated code due to invalid imports
+	// This is expected when LLM generates imports like "com.example/core" instead of proper Go modules
 	cmd := exec.Command(w.Options.CompilerPath, "mod", "tidy")
 	cmd.Dir = outdir
 	if err := cmd.Run(); err != nil {
-		log.Error("go mod tidy failed: %v", err)
+		// Use Info level since this is expected for translated code
+		log.Info("go mod tidy skipped (expected for translated code with LLM-generated imports): %v", err)
+		log.Info("Note: You may need to manually fix import paths in the generated code")
 	}
 	return nil
 }

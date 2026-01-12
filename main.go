@@ -38,7 +38,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/abcoder/lang"
 	"github.com/cloudwego/abcoder/lang/collect"
@@ -101,6 +104,14 @@ func main() {
 
 	var skillName string
 	flags.StringVar(&skillName, "skill", "", "specify skill name to use (empty for auto-match)")
+
+	// Translation post-processing options
+	var webFramework string
+	flags.StringVar(&webFramework, "framework", "", "web framework for translation: gin, echo, actix, fastapi, flask, none (default: auto)")
+	var noEntryPoint bool
+	flags.BoolVar(&noEntryPoint, "no-entry", false, "skip entry point generation")
+	var noConfig bool
+	flags.BoolVar(&noConfig, "no-config", false, "skip project config generation (go.mod, Cargo.toml, etc.)")
 
 	flags.Usage = func() {
 		fmt.Fprint(os.Stderr, Usage)
@@ -211,21 +222,46 @@ func main() {
 			os.Exit(1)
 		}
 
-		// Validate destination language (currently only java to go is supported)
-		if srcLang != uniast.Java {
-			log.Error("Currently only Java to Go translation is supported. Source language must be 'java'\n")
+		// Validate source and destination languages
+		supportedSrcLangs := []uniast.Language{uniast.Java, uniast.Golang, uniast.Python, uniast.Rust, uniast.Cxx}
+		supportedDstLangs := []uniast.Language{uniast.Golang, uniast.Python, uniast.Rust, uniast.Java, uniast.Cxx}
+
+		srcSupported := false
+		for _, l := range supportedSrcLangs {
+			if srcLang == l {
+				srcSupported = true
+				break
+			}
+		}
+		if !srcSupported {
+			log.Error("Unsupported source language: %s. Supported: java, go, python, rust, cxx\n", srcLang)
 			os.Exit(1)
 		}
-		if dstLang != uniast.Golang {
-			log.Error("Currently only Java to Go translation is supported. Destination language must be 'go'\n")
+
+		dstSupported := false
+		for _, l := range supportedDstLangs {
+			if dstLang == l {
+				dstSupported = true
+				break
+			}
+		}
+		if !dstSupported {
+			log.Error("Unsupported destination language: %s. Supported: java, go, python, rust, cxx\n", dstLang)
 			os.Exit(1)
 		}
+
+		if srcLang == dstLang {
+			log.Error("Source and destination languages must be different\n")
+			os.Exit(1)
+		}
+
+		log.Info("Translating %s → %s\n", srcLang, dstLang)
 
 		if flagVerbose != nil && *flagVerbose {
 			log.SetLogLevel(log.DebugLevel)
 		}
 
-		// Parse Java project to UniAST
+		// Parse source project to UniAST
 		parseOpts := lang.ParseOptions{
 			CollectOption: collect.CollectOption{
 				Language: srcLang,
@@ -242,271 +278,175 @@ func main() {
 
 		astJSON, err := lang.Parse(context.Background(), uri, parseOpts)
 		if err != nil {
-			log.Error("Failed to parse Java project: %v\n", err)
+			log.Error("Failed to parse %s project: %v\n", srcLang, err)
 			os.Exit(1)
 		}
 
-		// Write AST to temp file for agent
+		// Write AST to temp file for debugging
 		tempASTDir := filepath.Join(os.TempDir(), "abcoder-translate-asts")
 		os.MkdirAll(tempASTDir, 0755)
-		tempASTFile := filepath.Join(tempASTDir, "java-repo.json")
+		tempASTFile := filepath.Join(tempASTDir, fmt.Sprintf("%s-repo.json", srcLang))
 		if err := utils.MustWriteFile(tempASTFile, astJSON); err != nil {
 			log.Error("Failed to write AST file: %v\n", err)
 			os.Exit(1)
 		}
 
-		// Load Java repository
-		javaRepo, err := uniast.LoadRepo(tempASTFile)
+		// Load source repository
+		srcRepo, err := uniast.LoadRepo(tempASTFile)
 		if err != nil {
-			log.Error("Failed to load Java repository: %v\n", err)
+			log.Error("Failed to load %s repository: %v\n", srcLang, err)
 			os.Exit(1)
 		}
 
-		// Prepare translation
-		// GoModuleName will be auto-derived from groupId in Translate function
-		// If empty, Translate will extract groupId from the first module
-		translateOpts := translate.TranslateOptions{
-			GoModuleName: "", // Auto-derive from groupId
-			OutputDir:    "",
-		}
+		log.Info("%s UniAST generated and saved to: %s\n", srcLang, tempASTFile)
+
+		// Determine output directory
+		outputDir := ""
 		if flagOutput != nil && *flagOutput != "" {
-			translateOpts.OutputDir = *flagOutput
+			outputDir = *flagOutput
 		} else {
-			translateOpts.OutputDir = filepath.Base(uri) + "-go"
-		}
-
-		log.Info("Java UniAST generated and saved to: %s\n", tempASTFile)
-
-		// Create translator agent (LLM)
-		translatorOpts := agent.TranslatorOptions{
-			ModelConfig: llm.ModelConfig{
-				APIType:   llm.NewModelType(os.Getenv("API_TYPE")),
-				APIKey:    os.Getenv("API_KEY"),
-				ModelName: os.Getenv("MODEL_NAME"),
-				BaseURL:   os.Getenv("BASE_URL"),
-			},
-			MaxSteps: 100,
-			ASTsDir:  tempASTDir,
-		}
-
-		if translatorOpts.APIType == llm.ModelTypeUnknown {
-			log.Error("env API_TYPE is required for translation")
-			os.Exit(1)
-		}
-		if translatorOpts.APIKey == "" {
-			log.Error("env API_KEY is required for translation")
-			os.Exit(1)
-		}
-		if translatorOpts.ModelName == "" {
-			log.Error("env MODEL_NAME is required for translation")
-			os.Exit(1)
+			outputDir = filepath.Base(uri) + "-" + string(dstLang)
 		}
 
 		// Create output directory
-		outputDir := translateOpts.OutputDir
 		if err := os.MkdirAll(outputDir, 0755); err != nil {
 			log.Error("Failed to create output directory: %v\n", err)
 			os.Exit(1)
 		}
 
-		// Step 2: Convert Java UniAST to Go UniAST (structure-preserving)
-		log.Info("Converting Java UniAST to Go UniAST...\n")
+		// Setup LLM configuration
+		modelConfig := llm.ModelConfig{
+			APIType:   llm.NewModelType(os.Getenv("API_TYPE")),
+			APIKey:    os.Getenv("API_KEY"),
+			ModelName: os.Getenv("MODEL_NAME"),
+			BaseURL:   os.Getenv("BASE_URL"),
+		}
 
-		// Use translate package to create Go UniAST structure from Java UniAST
-		goRepo, err := translate.Translate(context.Background(), javaRepo, translateOpts)
-		if err != nil {
-			log.Error("Failed to create Go UniAST structure: %v\n", err)
+		if modelConfig.APIType == llm.ModelTypeUnknown {
+			log.Error("env API_TYPE is required for translation")
+			os.Exit(1)
+		}
+		if modelConfig.APIKey == "" {
+			log.Error("env API_KEY is required for translation")
+			os.Exit(1)
+		}
+		if modelConfig.ModelName == "" {
+			log.Error("env MODEL_NAME is required for translation")
 			os.Exit(1)
 		}
 
-		// Step 3: Translate Content fields per-package using LLM
-		log.Info("Translating code content per package using LLM...\n")
+		// Create LLM translator callback
+		llmTranslator := createLLMTranslator(modelConfig)
 
-		successCount := 0
-		totalPkgs := 0
-
-		for goModPath, goMod := range goRepo.Modules {
-			if goMod.IsExternal() {
-				continue
-			}
-			for goPkgPath, goPkg := range goMod.Packages {
-				totalPkgs++
-				log.Info("[Package %d] Translating content: %s\n", totalPkgs, goPkgPath)
-
-				// Collect all code content that needs translation
-				var contentToTranslate []struct {
-					nodeType string // "function", "type", "var"
-					name     string
-					javaCode string
-				}
-
-				for name, fn := range goPkg.Functions {
-					if fn.Content != "" {
-						contentToTranslate = append(contentToTranslate, struct {
-							nodeType string
-							name     string
-							javaCode string
-						}{"function", name, fn.Content})
-					}
-				}
-				for name, tp := range goPkg.Types {
-					if tp.Content != "" {
-						contentToTranslate = append(contentToTranslate, struct {
-							nodeType string
-							name     string
-							javaCode string
-						}{"type", name, tp.Content})
-					}
-				}
-				for name, v := range goPkg.Vars {
-					if v.Content != "" {
-						contentToTranslate = append(contentToTranslate, struct {
-							nodeType string
-							name     string
-							javaCode string
-						}{"var", name, v.Content})
-					}
-				}
-
-				if len(contentToTranslate) == 0 {
-					log.Info("  Skipping: No code content to translate\n")
-					continue
-				}
-
-				// Build combined prompt for all content in this package
-				var contentList string
-				for i, item := range contentToTranslate {
-					contentList += fmt.Sprintf("\n--- %s: %s ---\n%s\n", item.nodeType, item.name, item.javaCode)
-					if i > 10 { // Limit to avoid context overflow
-						contentList += fmt.Sprintf("\n... and %d more items\n", len(contentToTranslate)-i-1)
-						break
-					}
-				}
-
-				translationPrompt := fmt.Sprintf(`You are a code translator. Translate Java code to idiomatic Go code.
-
-IMPORTANT:
-- Output ONLY a JSON object, no tool calls
-- Do NOT use any tools like translate_node
-- Return translations in this exact format:
-
-{"translations": [{"name": "item_name", "go_code": "translated code"}]}
-
-Target Go package: %s
-Target Go module: %s
-
-Translation rules:
-1. String → string, int → int, long → int64, boolean → bool
-2. List<T> → []T, Map<K,V> → map[K]V, Set<T> → map[T]bool
-3. public → PascalCase (exported), private → camelCase (unexported)
-4. class → struct, interface → interface
-5. throws Exception → (result, error) return pattern
-6. static methods → package-level functions
-7. this.field → receiver.field
-
-Java code to translate:
-%s
-
-Output ONLY valid JSON. Do not use any tools.`, goPkgPath, goModPath, contentList)
-
-				// Call LLM directly without tools
-				response, err := callLLMWithoutTools(context.Background(), translatorOpts.ModelConfig, translationPrompt)
-				if err != nil {
-					log.Info("  Error: LLM translation failed: %v\n", err)
-					continue
-				}
-
-				// Parse translations
-				translations := parseTranslations(response)
-				if len(translations) == 0 {
-					log.Info("  Warning: No translations parsed\n")
-					continue
-				}
-
-				// Apply translations to UniAST with flexible name matching
-				appliedCount := 0
-				for _, tr := range translations {
-					if tr.GoCode == "" {
-						continue
-					}
-
-					// Try to match functions with flexible name matching
-					for fnName, fn := range goPkg.Functions {
-						if matchTranslationName(tr.Name, fnName) {
-							fn.Content = tr.GoCode
-							appliedCount++
-							break
-						}
-					}
-
-					// Try to match types
-					for typeName, tp := range goPkg.Types {
-						if matchTranslationName(tr.Name, typeName) {
-							tp.Content = tr.GoCode
-							appliedCount++
-							break
-						}
-					}
-
-					// Try to match vars
-					for varName, v := range goPkg.Vars {
-						if matchTranslationName(tr.Name, varName) {
-							v.Content = tr.GoCode
-							appliedCount++
-							break
-						}
-					}
-				}
-
-				log.Info("  Applied %d/%d translations\n", appliedCount, len(contentToTranslate))
-				if appliedCount > 0 {
-					successCount++
-				}
+		// Determine web framework if auto
+		framework := webFramework
+		if framework == "" {
+			// Auto-detect based on target language
+			switch dstLang {
+			case uniast.Golang:
+				framework = "gin"
+			case uniast.Rust:
+				framework = "actix"
+			case uniast.Python:
+				framework = "fastapi"
+			default:
+				framework = "none"
 			}
 		}
 
-		log.Info("Content translation completed: %d/%d packages with translations\n", successCount, totalPkgs)
-
-		// Save Go UniAST to file for debugging
-		goASTFile := filepath.Join(tempASTDir, "go-repo.json")
-		goASTBytes, _ := json.MarshalIndent(goRepo, "", "  ")
-		if err := utils.MustWriteFile(goASTFile, goASTBytes); err != nil {
-			log.Info("Warning: Failed to save Go UniAST: %v\n", err)
-		} else {
-			log.Info("Go UniAST saved to: %s\n", goASTFile)
+		// Prepare translation options using new API
+		translateOpts := translate.TranslateOptions{
+			SourceLanguage:     srcLang,
+			TargetLanguage:     dstLang,
+			TargetModuleName:   "", // Auto-derive from source
+			OutputDir:          outputDir,
+			LLMTranslator:      llmTranslator,
+			Parallel:           false, // Sequential for better debugging
+			Concurrency:        1,
+			WebFramework:       framework,
+			GenerateEntryPoint: !noEntryPoint,
+			GenerateConfig:     !noConfig,
 		}
 
-		// Step 4: Use Go Writer to write code from UniAST
-		log.Info("Writing Go code from UniAST to: %s\n", outputDir)
-		writeOpts := lang.WriteOptions{
+		// Transform source UniAST to target UniAST with LLM content translation
+		log.Info("Translating %s to %s using LLM (Parser → Transform → Writer flow)...\n", srcLang, dstLang)
+
+		// Use TranslateAST to get the target repo (so we can save it)
+		targetRepo, err := translate.TranslateAST(context.Background(), srcRepo, translateOpts)
+		if err != nil {
+			log.Error("Failed to translate: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Save target UniAST to JSON file
+		targetASTFile := filepath.Join(tempASTDir, fmt.Sprintf("%s-repo.json", dstLang))
+		targetASTJSON, err := json.MarshalIndent(targetRepo, "", "  ")
+		if err != nil {
+			log.Error("Failed to marshal target AST: %v\n", err)
+			os.Exit(1)
+		}
+		if err := utils.MustWriteFile(targetASTFile, targetASTJSON); err != nil {
+			log.Error("Failed to write target AST file: %v\n", err)
+			os.Exit(1)
+		}
+		log.Info("Target UniAST saved to: %s\n", targetASTFile)
+
+		// Write target code using lang.Write
+		err = lang.Write(context.Background(), targetRepo, lang.WriteOptions{
 			OutputDir: outputDir,
-			Compiler:  "go",
-		}
-		if err := lang.Write(context.Background(), goRepo, writeOpts); err != nil {
-			log.Error("Failed to write Go code from UniAST: %v\n", err)
-			// Don't exit, try to continue with go.mod generation
-		}
-
-		// Generate go.mod (optional, Writer may handle this)
-		if modName, err := generateGoMod(outputDir, translateOpts.GoModuleName); err != nil {
-			log.Info("Failed to generate go.mod: %v\n", err)
-		} else {
-			log.Info("go.mod generated with module name: %s\n", modName)
+		})
+		if err != nil {
+			log.Error("Failed to write target code: %v\n", err)
+			os.Exit(1)
 		}
 
-		// Run go mod tidy
-		if err := runGoModTidy(outputDir); err != nil {
-			log.Info("Failed to run go mod tidy: %v\n", err)
-		}
-
-		// Try to build
-		if err := runGoBuild(outputDir); err != nil {
-			log.Info("Go build failed: %v\n", err)
+		// Run target language specific post-processing
+		switch dstLang {
+		case uniast.Golang:
+			// Fix invalid imports in generated Go files
+			// First try to read module name from go.mod
+			moduleName := readGoModuleName(outputDir)
+			if moduleName == "" {
+				moduleName = translateOpts.TargetModuleName
+			}
+			if moduleName == "" {
+				moduleName = "github.com/example/" + filepath.Base(outputDir)
+			}
+			if err := fixGoImportsInFiles(outputDir, moduleName); err != nil {
+				log.Info("Failed to fix imports: %v\n", err)
+			}
+			// Run goimports to fix any remaining import issues and format code
+			if err := runGoimports(outputDir); err != nil {
+				log.Info("Failed to run goimports: %v\n", err)
+			}
+			// Run go mod tidy
+			if err := runGoModTidy(outputDir); err != nil {
+				log.Info("Failed to run go mod tidy: %v\n", err)
+			}
+			// Try to build
+			if err := runGoBuild(outputDir); err != nil {
+				log.Info("Go build failed: %v\n", err)
+			}
+		case uniast.Rust:
+			// Run cargo check
+			if err := runCargoCheck(outputDir); err != nil {
+				log.Info("Cargo check failed: %v\n", err)
+			}
+		case uniast.Python:
+			// Python doesn't need compilation, but we can check syntax
+			log.Info("Python code generated. Run 'python -m py_compile <file>' to check syntax.\n")
+		case uniast.Java:
+			// Java compilation would need maven or gradle
+			log.Info("Java code generated. Run 'mvn compile' or 'gradle build' to compile.\n")
+		case uniast.Cxx:
+			// C++ compilation would need cmake or make
+			log.Info("C++ code generated. Run 'cmake . && make' or 'g++ -o main *.cpp' to compile.\n")
 		}
 
 		log.Info("Translation completed successfully!\n")
-		log.Info("Java UniAST: %s\n", tempASTFile)
-		log.Info("Go code written to: %s\n", outputDir)
+		log.Info("Source UniAST: %s\n", tempASTFile)
+		log.Info("Target UniAST: %s\n", targetASTFile)
+		log.Info("%s code written to: %s\n", dstLang, outputDir)
 
 	case "agent":
 		_, uri := parseArgsAndFlags(flags, false, flagHelp, flagVerbose)
@@ -995,6 +935,91 @@ func callLLMWithoutTools(ctx context.Context, modelConfig llm.ModelConfig, promp
 	return response.Content, nil
 }
 
+// createLLMTranslator creates an LLM translator callback for the translate package
+func createLLMTranslator(modelConfig llm.ModelConfig) translate.LLMTranslateFunc {
+	return func(ctx context.Context, req *translate.LLMTranslateRequest) (*translate.LLMTranslateResponse, error) {
+		// Use the pre-built prompt from PromptBuilder
+		prompt := req.Prompt
+		if prompt == "" {
+			// Fallback: build a simple prompt
+			prompt = fmt.Sprintf("Translate the following %s code to %s:\n\n%s\n\nReturn ONLY the translated code, no explanations.",
+				req.SourceLanguage, req.TargetLanguage, req.SourceContent)
+		}
+
+		log.Debug("LLM Translation Request:\n  Node: %s\n  Type: %s\n", req.Identity.Name, req.NodeType)
+
+		// Call LLM with retry logic for transient errors
+		maxRetries := 3
+		var response string
+		var err error
+
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			response, err = callLLMWithoutTools(ctx, modelConfig, prompt)
+			if err == nil {
+				break
+			}
+
+			// Check if error is retryable (timeout, connection reset, etc.)
+			errStr := err.Error()
+			isRetryable := strings.Contains(errStr, "timeout") ||
+				strings.Contains(errStr, "timed out") ||
+				strings.Contains(errStr, "connection reset") ||
+				strings.Contains(errStr, "connection refused") ||
+				strings.Contains(errStr, "EOF") ||
+				strings.Contains(errStr, "temporary failure")
+
+			if !isRetryable || attempt == maxRetries {
+				log.Error("LLM call failed after %d attempts: %v\n", attempt, err)
+				return &translate.LLMTranslateResponse{
+					Error: fmt.Sprintf("LLM call failed: %v", err),
+				}, nil
+			}
+
+			// Exponential backoff: 2s, 4s, 8s
+			backoff := time.Duration(1<<uint(attempt)) * time.Second
+			log.Info("LLM call failed (attempt %d/%d), retrying in %v: %v\n", attempt, maxRetries, backoff, err)
+			time.Sleep(backoff)
+		}
+
+		// Clean up response - remove markdown code fences if present
+		content := cleanCodeResponse(response)
+
+		log.Debug("LLM Translation Response:\n  Content length: %d\n", len(content))
+
+		return &translate.LLMTranslateResponse{
+			TargetContent: content,
+		}, nil
+	}
+}
+
+// cleanCodeResponse removes markdown code fences from LLM response
+func cleanCodeResponse(response string) string {
+	response = strings.TrimSpace(response)
+
+	// Remove language-specific code fence prefixes
+	prefixes := []string{
+		"```go", "```golang",
+		"```rust", "```rs",
+		"```python", "```py",
+		"```java",
+		"```cpp", "```c++", "```cxx",
+		"```",
+	}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(response, prefix) {
+			response = strings.TrimPrefix(response, prefix)
+			break
+		}
+	}
+
+	// Remove trailing ```
+	if strings.HasSuffix(response, "```") {
+		response = strings.TrimSuffix(response, "```")
+	}
+
+	return strings.TrimSpace(response)
+}
+
 // matchTranslationName checks if a translation name matches a UniAST node name
 // Supports flexible matching because LLM may return different name formats
 // e.g., "GetCreatedAt" should match "BaseEntity.GetCreatedAt()" or "BaseEntity.GetCreatedAt"
@@ -1183,6 +1208,788 @@ func generateGoMod(outputDir, moduleName string) (string, error) {
 }
 
 // runGoModTidy runs go mod tidy in the output directory
+// fixGoImportsInFiles fixes invalid imports in generated Go files
+func fixGoImportsInFiles(outputDir, moduleName string) error {
+	// First pass: identify main packages (can't be imported)
+	mainPackages := make(map[string]bool)
+	filepath.Walk(outputDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		// Check if this file has package main
+		if strings.Contains(string(content), "package main") {
+			rel, _ := filepath.Rel(outputDir, filepath.Dir(path))
+			if rel != "" && rel != "." {
+				mainPackages[rel] = true
+			}
+		}
+		return nil
+	})
+
+	// Second pass: fix imports and clean up code
+	return filepath.Walk(outputDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+
+		// Read the file
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read file %s failed: %v", path, err)
+		}
+
+		original := string(content)
+
+		// Step 1: Remove duplicate declarations and clean up
+		fixed := cleanupGoCode(original)
+
+		// Step 2: Consolidate and fix all imports (collect, fix paths, move to top)
+		fixed = consolidateImports(fixed, moduleName)
+
+		// Step 3: Fix invalid import paths that might remain
+		fixed = fixGoImportString(fixed, moduleName, outputDir, mainPackages)
+
+		// Step 4: Auto-fix standard library imports based on usage
+		fixed = autoFixStandardImports(fixed)
+
+		// Step 5: Fix cross-package type references
+		// Determine current package from directory
+		relDir, _ := filepath.Rel(outputDir, filepath.Dir(path))
+		currentPkg := filepath.Base(relDir)
+		if currentPkg == "." || currentPkg == "" {
+			currentPkg = "main"
+		}
+		fixed = fixCrossPackageTypes(fixed, currentPkg, nil)
+
+		// Only write if changed
+		if fixed != original {
+			if err := os.WriteFile(path, []byte(fixed), 0644); err != nil {
+				return fmt.Errorf("write file %s failed: %v", path, err)
+			}
+			log.Info("Fixed imports in: %s\n", path)
+		}
+
+		return nil
+	})
+}
+
+// fixGoImportString fixes invalid imports in Go source code
+func fixGoImportString(content, moduleName, outputDir string, mainPackages map[string]bool) string {
+	// Get existing package directories
+	pkgDirs := make(map[string]bool)
+	filepath.Walk(outputDir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && info.IsDir() && path != outputDir {
+			rel, _ := filepath.Rel(outputDir, path)
+			if rel != "" && !strings.HasPrefix(rel, ".") {
+				pkgDirs[rel] = true
+				pkgDirs[filepath.Base(rel)] = true
+			}
+		}
+		return nil
+	})
+
+	// Common Java to Go package mappings
+	javaToGo := map[string]string{
+		"core": "repository", "domain": "model", "entity": "model",
+		"entities": "model", "dto": "model", "vo": "model",
+		"dao": "repository", "mapper": "repository", "repo": "repository",
+		"api": "controller", "rest": "controller", "endpoint": "controller",
+		"impl": "service", "business": "service",
+		"common": "utils", "util": "utils", "helper": "utils",
+		"application": "", // Remove application imports (doesn't exist)
+	}
+
+	// Process all import paths in the content
+	importBlockRegex := regexp.MustCompile(`(?s)import\s*\(\s*(.*?)\s*\)`)
+	singleImportRegex := regexp.MustCompile(`"([^"]+)"`)
+
+	content = importBlockRegex.ReplaceAllStringFunc(content, func(block string) string {
+		return singleImportRegex.ReplaceAllStringFunc(block, func(match string) string {
+			importPath := strings.Trim(match, `"`)
+
+			// Skip standard library and well-known packages
+			if !strings.Contains(importPath, "/") && !strings.Contains(importPath, ".") {
+				return match // Keep standard library imports
+			}
+			if strings.HasPrefix(importPath, "github.com/gin") ||
+				strings.HasPrefix(importPath, "golang.org") {
+				return match
+			}
+
+			// Extract the package name (last segment)
+			parts := strings.Split(importPath, "/")
+			pkgName := strings.ToLower(parts[len(parts)-1])
+
+			// Check if mapped to empty (should be removed)
+			if mapped, ok := javaToGo[pkgName]; ok && mapped == "" {
+				return `"REMOVE_THIS_IMPORT"`
+			}
+
+			// Check if target is a main package (can't be imported)
+			if mainPackages[pkgName] {
+				return `"REMOVE_THIS_IMPORT"`
+			}
+
+			// If already using module path, check if it's valid
+			if strings.HasPrefix(importPath, moduleName) {
+				targetPkg := strings.TrimPrefix(importPath, moduleName+"/")
+				if pkgDirs[targetPkg] && !mainPackages[targetPkg] {
+					return match // Keep valid imports
+				}
+				pkgName = strings.ToLower(filepath.Base(targetPkg))
+			}
+
+			// Check if this package exists directly
+			if pkgDirs[pkgName] && !mainPackages[pkgName] {
+				return `"` + moduleName + "/" + pkgName + `"`
+			}
+
+			// Try common mappings
+			if mappedPkg, ok := javaToGo[pkgName]; ok && mappedPkg != "" {
+				if pkgDirs[mappedPkg] && !mainPackages[mappedPkg] {
+					return `"` + moduleName + "/" + mappedPkg + `"`
+				}
+			}
+
+			// Try to find a similar package
+			for dir := range pkgDirs {
+				if !mainPackages[dir] && (strings.Contains(dir, pkgName) || strings.Contains(pkgName, dir)) {
+					return `"` + moduleName + "/" + dir + `"`
+				}
+			}
+
+			// If no match found, remove the import
+			return `"REMOVE_THIS_IMPORT"`
+		})
+	})
+
+	// Remove marked imports and empty lines
+	lines := strings.Split(content, "\n")
+	var cleanedLines []string
+	for _, line := range lines {
+		if !strings.Contains(line, "REMOVE_THIS_IMPORT") {
+			cleanedLines = append(cleanedLines, line)
+		}
+	}
+	content = strings.Join(cleanedLines, "\n")
+
+	// Fix type references (core.X -> repository.X, etc.)
+	content = strings.ReplaceAll(content, "core.", "repository.")
+	content = strings.ReplaceAll(content, "web.EmailService", "service.EmailService")
+	content = strings.ReplaceAll(content, "web.NewEmailService", "service.NewEmailService")
+	content = strings.ReplaceAll(content, "web.UserRegistrationService", "service.UserRegistrationService")
+	content = strings.ReplaceAll(content, "web.NewUserRegistrationService", "service.NewUserRegistrationService")
+
+	return content
+}
+
+// cleanupGoCode cleans up common issues in generated Go code
+func cleanupGoCode(content string) string {
+	// Step 0: Fix invalid type declarations like "type pkg.TypeName struct{}" -> "type TypeName struct{}"
+	content = fixInvalidTypeDeclarations(content)
+
+	// Step 0.5: Fix common LLM syntax errors
+	content = fixCommonLLMErrors(content)
+
+	// Step 1: Remove duplicate declarations (types, structs, methods, functions)
+	content = deduplicateDeclarations(content)
+
+	// Step 2: Remove duplicate main functions (keep only the first one)
+	mainFuncRegex := regexp.MustCompile(`func main\(\)\s*\{`)
+	matches := mainFuncRegex.FindAllStringIndex(content, -1)
+	if len(matches) > 1 {
+		for i := len(matches) - 1; i > 0; i-- {
+			start := matches[i][0]
+			braceCount := 0
+			funcEnd := start
+			inFunc := false
+			for j := start; j < len(content); j++ {
+				if content[j] == '{' {
+					braceCount++
+					inFunc = true
+				} else if content[j] == '}' {
+					braceCount--
+					if inFunc && braceCount == 0 {
+						funcEnd = j + 1
+						break
+					}
+				}
+			}
+			if funcEnd > start {
+				content = content[:start] + content[funcEnd:]
+			}
+		}
+	}
+
+	// Step 3: Remove empty import blocks
+	content = regexp.MustCompile(`import\s*\(\s*\)`).ReplaceAllString(content, "")
+
+	// Step 4: Remove consecutive empty lines (more than 2)
+	content = regexp.MustCompile(`\n{3,}`).ReplaceAllString(content, "\n\n")
+
+	return content
+}
+
+// fixCommonLLMErrors fixes common syntax errors generated by LLMs
+func fixCommonLLMErrors(content string) string {
+	// Fix "!strings.TrimSpace(str) == """ -> "strings.TrimSpace(str) != """
+	content = regexp.MustCompile(`!\s*strings\.TrimSpace\(([^)]+)\)\s*==\s*""`).
+		ReplaceAllString(content, `strings.TrimSpace($1) != ""`)
+
+	// Fix "!StringUtils.IsEmpty(str)" -> "!IsEmpty(str)" (when StringUtils is a type, not instance)
+	content = regexp.MustCompile(`!StringUtils\.IsEmpty\(`).
+		ReplaceAllString(content, `!IsEmpty(`)
+
+	// Fix "StringUtils.IsEmpty(" -> "IsEmpty(" (same issue)
+	content = regexp.MustCompile(`StringUtils\.IsEmpty\(`).
+		ReplaceAllString(content, `IsEmpty(`)
+
+	// Fix "u.GetId()" -> "u.GetID()" (Go naming convention)
+	content = strings.ReplaceAll(content, ".GetId()", ".GetID()")
+	content = strings.ReplaceAll(content, ".SetId(", ".SetID(")
+
+	return content
+}
+
+// fixInvalidTypeDeclarations fixes invalid Go type declarations like "type pkg.Name struct{}"
+// These are generated when LLM produces Java-style qualified names
+func fixInvalidTypeDeclarations(content string) string {
+	// Fix "type pkg.TypeName" -> "type TypeName"
+	// Match: type <word>.<word> <rest>
+	typeRegex := regexp.MustCompile(`type\s+(\w+)\.(\w+)\s+(struct|interface|\w)`)
+	content = typeRegex.ReplaceAllString(content, "type $2 $3")
+
+	// Also fix "var pkg.VarName" -> "var VarName"
+	varRegex := regexp.MustCompile(`var\s+(\w+)\.(\w+)\s+`)
+	content = varRegex.ReplaceAllString(content, "var $2 ")
+
+	// Fix "const pkg.ConstName" -> "const ConstName"
+	constRegex := regexp.MustCompile(`const\s+(\w+)\.(\w+)\s*=`)
+	content = constRegex.ReplaceAllString(content, "const $2 =")
+
+	return content
+}
+
+// deduplicateDeclarations removes duplicate type, struct, const, var, and method declarations
+func deduplicateDeclarations(content string) string {
+	lines := strings.Split(content, "\n")
+
+	// Track seen declarations
+	seenTypes := make(map[string]bool)  // type Name ...
+	seenConsts := make(map[string]bool) // const Name ...
+	seenVars := make(map[string]bool)   // var Name ...
+	seenFuncs := make(map[string]bool)  // func Name(...) or func (r Receiver) Name(...)
+
+	var result []string
+	i := 0
+
+	for i < len(lines) {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+
+		// Check for type declaration: "type Name struct/interface/..."
+		if typeMatch := regexp.MustCompile(`^type\s+(\w+)\s+`).FindStringSubmatch(trimmed); len(typeMatch) > 1 {
+			typeName := typeMatch[1]
+			if seenTypes[typeName] {
+				// Skip this duplicate type declaration including its body
+				i = skipDeclarationBlock(lines, i)
+				continue
+			}
+			seenTypes[typeName] = true
+		}
+
+		// Check for const block or single const
+		if constMatch := regexp.MustCompile(`^const\s+(\w+)\s*=`).FindStringSubmatch(trimmed); len(constMatch) > 1 {
+			constName := constMatch[1]
+			if seenConsts[constName] {
+				i++
+				continue
+			}
+			seenConsts[constName] = true
+		}
+
+		// Check for const block: "const ("
+		if strings.HasPrefix(trimmed, "const (") {
+			// Extract const names from block and check for duplicates
+			blockStart := i
+			blockEnd := findBlockEnd(lines, i)
+
+			// Check if any const in this block is a duplicate
+			hasDuplicate := false
+			for j := blockStart + 1; j < blockEnd; j++ {
+				constLine := strings.TrimSpace(lines[j])
+				if constNameMatch := regexp.MustCompile(`^(\w+)\s*[=\s]`).FindStringSubmatch(constLine); len(constNameMatch) > 1 {
+					if seenConsts[constNameMatch[1]] {
+						hasDuplicate = true
+					}
+				}
+			}
+
+			if hasDuplicate {
+				// Skip the entire duplicate const block
+				i = blockEnd + 1
+				continue
+			}
+
+			// Mark all consts in block as seen
+			for j := blockStart + 1; j < blockEnd; j++ {
+				constLine := strings.TrimSpace(lines[j])
+				if constNameMatch := regexp.MustCompile(`^(\w+)\s*[=\s]`).FindStringSubmatch(constLine); len(constNameMatch) > 1 {
+					seenConsts[constNameMatch[1]] = true
+				}
+			}
+		}
+
+		// Check for method declaration: "func (r *Receiver) Name(...)"
+		if methodMatch := regexp.MustCompile(`^func\s+\((\w+)\s+\*?(\w+)\)\s+(\w+)\s*\(`).FindStringSubmatch(trimmed); len(methodMatch) > 3 {
+			receiverType := methodMatch[2]
+			methodName := methodMatch[3]
+			key := receiverType + "." + methodName
+			if seenFuncs[key] {
+				// Skip this duplicate method
+				i = skipDeclarationBlock(lines, i)
+				continue
+			}
+			seenFuncs[key] = true
+		} else if funcMatch := regexp.MustCompile(`^func\s+(\w+)\s*\(`).FindStringSubmatch(trimmed); len(funcMatch) > 1 {
+			// Check for standalone function: "func Name(...)"
+			funcName := funcMatch[1]
+			if seenFuncs[funcName] {
+				// Skip this duplicate function
+				i = skipDeclarationBlock(lines, i)
+				continue
+			}
+			seenFuncs[funcName] = true
+		}
+
+		// Check for var declaration
+		if varMatch := regexp.MustCompile(`^var\s+(\w+)\s+`).FindStringSubmatch(trimmed); len(varMatch) > 1 {
+			varName := varMatch[1]
+			if seenVars[varName] {
+				i++
+				continue
+			}
+			seenVars[varName] = true
+		}
+
+		result = append(result, line)
+		i++
+	}
+
+	return strings.Join(result, "\n")
+}
+
+// skipDeclarationBlock skips a declaration block (type, func, etc.) and returns the next line index
+func skipDeclarationBlock(lines []string, startIdx int) int {
+	if startIdx >= len(lines) {
+		return startIdx + 1
+	}
+
+	line := lines[startIdx]
+
+	// If the line contains '{', find the matching '}'
+	if strings.Contains(line, "{") {
+		braceCount := strings.Count(line, "{") - strings.Count(line, "}")
+		if braceCount == 0 {
+			return startIdx + 1
+		}
+
+		for i := startIdx + 1; i < len(lines); i++ {
+			braceCount += strings.Count(lines[i], "{") - strings.Count(lines[i], "}")
+			if braceCount <= 0 {
+				return i + 1
+			}
+		}
+	}
+
+	return startIdx + 1
+}
+
+// findBlockEnd finds the end of a block (const, var, type) that starts with "("
+func findBlockEnd(lines []string, startIdx int) int {
+	parenCount := 0
+	for i := startIdx; i < len(lines); i++ {
+		parenCount += strings.Count(lines[i], "(") - strings.Count(lines[i], ")")
+		if parenCount <= 0 && i > startIdx {
+			return i
+		}
+	}
+	return len(lines) - 1
+}
+
+// consolidateImports collects all imports from the file and moves them to the top
+func consolidateImports(content, moduleName string) string {
+	lines := strings.Split(content, "\n")
+
+	// Find package declaration line and determine current package
+	pkgLineIdx := -1
+	currentPkg := ""
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "package ") {
+			pkgLineIdx = i
+			// Extract package name
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				currentPkg = parts[1]
+			}
+			break
+		}
+	}
+	if pkgLineIdx == -1 {
+		return content
+	}
+
+	// Calculate the import path for the current package (to avoid self-imports)
+	currentPkgImport := moduleName + "/" + currentPkg
+
+	// Collect all imports and remove them from their current positions
+	imports := make(map[string]bool)
+	var newLines []string
+	i := 0
+
+	for i < len(lines) {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+
+		// Check for import block: import (...)
+		if strings.HasPrefix(trimmed, "import (") {
+			// Collect imports from block
+			i++
+			for i < len(lines) {
+				importLine := strings.TrimSpace(lines[i])
+				if importLine == ")" {
+					i++
+					break
+				}
+				// Extract import path
+				if importMatch := regexp.MustCompile(`"([^"]+)"`).FindStringSubmatch(importLine); len(importMatch) > 1 {
+					importPath := fixImportPath(strings.TrimSpace(importMatch[1]), moduleName)
+					// Skip self-imports (package importing itself)
+					// Also skip imports that end with the current package name
+					if importPath != "" && importPath != currentPkgImport && !strings.HasSuffix(importPath, "/"+currentPkg) {
+						imports[importPath] = true
+					}
+				}
+				i++
+			}
+			continue
+		}
+
+		// Check for single import: import "..."
+		if strings.HasPrefix(trimmed, "import \"") || strings.HasPrefix(trimmed, "import \"") {
+			if importMatch := regexp.MustCompile(`import\s+"([^"]+)"`).FindStringSubmatch(trimmed); len(importMatch) > 1 {
+				importPath := fixImportPath(strings.TrimSpace(importMatch[1]), moduleName)
+				// Skip self-imports (package importing itself)
+				if importPath != "" && importPath != currentPkgImport && !strings.HasSuffix(importPath, "/"+currentPkg) {
+					imports[importPath] = true
+				}
+			}
+			i++
+			continue
+		}
+
+		newLines = append(newLines, line)
+		i++
+	}
+
+	// Build consolidated import block
+	if len(imports) == 0 {
+		return strings.Join(newLines, "\n")
+	}
+
+	// Separate standard library imports from third-party imports
+	var stdImports, thirdPartyImports []string
+	for importPath := range imports {
+		if !strings.Contains(importPath, ".") {
+			stdImports = append(stdImports, importPath)
+		} else {
+			thirdPartyImports = append(thirdPartyImports, importPath)
+		}
+	}
+
+	// Sort imports
+	sort.Strings(stdImports)
+	sort.Strings(thirdPartyImports)
+
+	// Build import block
+	var importBlock strings.Builder
+	importBlock.WriteString("\nimport (\n")
+	for _, imp := range stdImports {
+		importBlock.WriteString(fmt.Sprintf("\t\"%s\"\n", imp))
+	}
+	if len(stdImports) > 0 && len(thirdPartyImports) > 0 {
+		importBlock.WriteString("\n")
+	}
+	for _, imp := range thirdPartyImports {
+		importBlock.WriteString(fmt.Sprintf("\t\"%s\"\n", imp))
+	}
+	importBlock.WriteString(")\n")
+
+	// Insert import block after package declaration
+	var result []string
+	for i, line := range newLines {
+		result = append(result, line)
+		if i == pkgLineIdx {
+			result = append(result, importBlock.String())
+		}
+	}
+
+	return strings.Join(result, "\n")
+}
+
+// fixImportPath fixes wrong import paths
+func fixImportPath(importPath, moduleName string) string {
+	// Skip empty imports
+	if importPath == "" {
+		return ""
+	}
+
+	// Fix common wrong standard library imports
+	stdlibFixes := map[string]string{
+		"big": "math/big",
+	}
+	if fixed, ok := stdlibFixes[importPath]; ok {
+		return fixed
+	}
+
+	// Fix wrong module paths like "github.com/example/java2go/model" -> "github.com/example/4-full-maven-repo/model"
+	wrongModules := []string{
+		"github.com/example/java2go/",
+		"github.com/example/java-to-go/",
+		"github.com/yourusername/",
+		"your-module/",
+		"com.example/",
+	}
+
+	for _, wrong := range wrongModules {
+		if strings.HasPrefix(importPath, wrong) {
+			pkg := strings.TrimPrefix(importPath, wrong)
+			return moduleName + "/" + pkg
+		}
+	}
+
+	// Fix bare package imports like "model" -> "github.com/example/xxx/model"
+	barePackages := []string{"model", "service", "repository", "controller", "config", "utils", "web"}
+	for _, bare := range barePackages {
+		if importPath == bare {
+			return moduleName + "/" + bare
+		}
+	}
+
+	return importPath
+}
+
+// autoFixStandardImports adds missing standard library imports based on usage
+func autoFixStandardImports(content string) string {
+	// Map of identifiers to their required imports
+	stdLibImports := map[string]string{
+		"time.Time":           "time",
+		"time.Duration":       "time",
+		"time.Now":            "time",
+		"time.Sleep":          "time",
+		"time.Second":         "time",
+		"time.Millisecond":    "time",
+		"atomic.Int64":        "sync/atomic",
+		"atomic.Int32":        "sync/atomic",
+		"atomic.Value":        "sync/atomic",
+		"atomic.AddInt64":     "sync/atomic",
+		"sync.Mutex":          "sync",
+		"sync.RWMutex":        "sync",
+		"sync.WaitGroup":      "sync",
+		"sync.Map":            "sync",
+		"context.Context":     "context",
+		"context.Background":  "context",
+		"context.WithCancel":  "context",
+		"fmt.Println":         "fmt",
+		"fmt.Printf":          "fmt",
+		"fmt.Sprintf":         "fmt",
+		"fmt.Errorf":          "fmt",
+		"errors.New":          "errors",
+		"errors.Is":           "errors",
+		"strings.Contains":    "strings",
+		"strings.TrimSpace":   "strings",
+		"strings.Split":       "strings",
+		"strings.Join":        "strings",
+		"strings.ToLower":     "strings",
+		"strings.ToUpper":     "strings",
+		"strconv.Itoa":        "strconv",
+		"strconv.Atoi":        "strconv",
+		"regexp.MustCompile":  "regexp",
+		"regexp.MatchString":  "regexp",
+		"json.Marshal":        "encoding/json",
+		"json.Unmarshal":      "encoding/json",
+		"http.Get":            "net/http",
+		"http.Post":           "net/http",
+		"http.Handler":        "net/http",
+		"http.Request":        "net/http",
+		"http.ResponseWriter": "net/http",
+		"log.Println":         "log",
+		"log.Printf":          "log",
+		"log.Fatal":           "log",
+		"os.Open":             "os",
+		"os.Create":           "os",
+		"os.ReadFile":         "os",
+		"os.WriteFile":        "os",
+		"io.Reader":           "io",
+		"io.Writer":           "io",
+		"io.Copy":             "io",
+		"math.Max":            "math",
+		"math.Min":            "math",
+		"math.Abs":            "math",
+		"rand.Intn":           "math/rand",
+		"rand.Int":            "math/rand",
+		"uuid.New":            "github.com/google/uuid",
+	}
+
+	// Detect which imports are needed
+	neededImports := make(map[string]bool)
+	for usage, pkg := range stdLibImports {
+		// Check for both "time.Time" style and just "time." prefix
+		parts := strings.SplitN(usage, ".", 2)
+		if len(parts) == 2 {
+			prefix := parts[0] + "."
+			if strings.Contains(content, prefix) {
+				neededImports[pkg] = true
+			}
+		}
+	}
+
+	// Also check for common type usages without package prefix
+	typeToImport := map[string]string{
+		"Time ":     "time", // "Time " as type
+		"Duration ": "time",
+		"Context ":  "context",
+	}
+	for typeUsage, pkg := range typeToImport {
+		if strings.Contains(content, typeUsage) && !strings.Contains(content, `"`+pkg+`"`) {
+			neededImports[pkg] = true
+		}
+	}
+
+	if len(neededImports) == 0 {
+		return content
+	}
+
+	// Check which imports are already present
+	existingImports := make(map[string]bool)
+	importBlockRegex := regexp.MustCompile(`(?s)import\s*\((.*?)\)`)
+	if matches := importBlockRegex.FindStringSubmatch(content); len(matches) > 1 {
+		importBlock := matches[1]
+		for pkg := range neededImports {
+			if strings.Contains(importBlock, `"`+pkg+`"`) {
+				existingImports[pkg] = true
+			}
+		}
+	}
+
+	// Build list of imports to add
+	var importsToAdd []string
+	for pkg := range neededImports {
+		if !existingImports[pkg] {
+			importsToAdd = append(importsToAdd, `	"`+pkg+`"`)
+		}
+	}
+
+	if len(importsToAdd) == 0 {
+		return content
+	}
+
+	// Add missing imports to import block
+	if importBlockRegex.MatchString(content) {
+		// Add to existing import block
+		content = importBlockRegex.ReplaceAllStringFunc(content, func(block string) string {
+			// Insert before the closing parenthesis
+			insertPos := strings.LastIndex(block, ")")
+			if insertPos > 0 {
+				newImports := strings.Join(importsToAdd, "\n")
+				return block[:insertPos] + newImports + "\n" + block[insertPos:]
+			}
+			return block
+		})
+	} else {
+		// Create new import block after package declaration
+		pkgRegex := regexp.MustCompile(`(package\s+\w+\s*\n)`)
+		newImportBlock := "\nimport (\n" + strings.Join(importsToAdd, "\n") + "\n)\n"
+		content = pkgRegex.ReplaceAllString(content, "${1}"+newImportBlock)
+	}
+
+	return content
+}
+
+// fixCrossPackageTypes fixes type references that need package prefixes
+func fixCrossPackageTypes(content, currentPkg string, pkgTypes map[string]string) string {
+	// Common type to package mappings
+	typeToPackage := map[string]string{
+		"User":                    "model",
+		"UserStatus":              "model",
+		"BaseEntity":              "model",
+		"UserRepository":          "repository",
+		"InMemoryUserRepository":  "repository",
+		"UserService":             "service",
+		"EmailService":            "service",
+		"UserRegistrationService": "service",
+		"UserController":          "controller",
+		"AppConfig":               "config",
+	}
+
+	// Merge with provided mappings
+	for t, pkg := range pkgTypes {
+		typeToPackage[t] = pkg
+	}
+
+	for typeName, pkg := range typeToPackage {
+		// Skip if we're in the same package
+		if pkg == currentPkg {
+			continue
+		}
+
+		// Pattern to match unqualified type usage (not already prefixed)
+		// Match: "User" but not "model.User", "*User" but not "*model.User"
+		patterns := []string{
+			`(\s)` + typeName + `(\s|,|\)|\{|\})`,            // Type in context
+			`(\*)` + typeName + `(\s|,|\)|\{|\})`,            // Pointer type
+			`(\[\])` + typeName + `(\s|,|\)|\{|\})`,          // Slice type
+			`(map\[[^\]]+\])` + typeName + `(\s|,|\)|\{|\})`, // Map value type
+			`(:\s*)` + typeName + `(\s|,|\)|\{|\})`,          // Field type
+			`(\s)` + typeName + `$`,                          // Type at end of line
+		}
+
+		for _, pattern := range patterns {
+			re := regexp.MustCompile(pattern)
+			replacement := "${1}" + pkg + "." + typeName + "${2}"
+			content = re.ReplaceAllString(content, replacement)
+		}
+	}
+
+	return content
+}
+
+// readGoModuleName reads the module name from go.mod file
+func readGoModuleName(outputDir string) string {
+	goModPath := filepath.Join(outputDir, "go.mod")
+	content, err := os.ReadFile(goModPath)
+	if err != nil {
+		return ""
+	}
+
+	// Parse module line: "module github.com/example/xxx"
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "module ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "module"))
+		}
+	}
+	return ""
+}
+
 func runGoModTidy(outputDir string) error {
 	cmd := exec.Command("go", "mod", "tidy")
 	cmd.Dir = outputDir
@@ -1192,12 +1999,75 @@ func runGoModTidy(outputDir string) error {
 	return nil
 }
 
+// runGoimports runs goimports on all Go files to fix imports and format code
+func runGoimports(outputDir string) error {
+	// First check if goimports is available
+	_, err := exec.LookPath("goimports")
+	if err != nil {
+		// Try to use gofmt as fallback
+		log.Info("goimports not found, using gofmt for formatting")
+		return runGofmt(outputDir)
+	}
+
+	// Run goimports on all Go files
+	return filepath.Walk(outputDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+
+		cmd := exec.Command("goimports", "-w", path)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			log.Info("goimports warning for %s: %s", path, string(output))
+			// Don't fail, just warn - the file might have syntax errors
+		}
+		return nil
+	})
+}
+
+// runGofmt runs gofmt on all Go files as a fallback
+func runGofmt(outputDir string) error {
+	return filepath.Walk(outputDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+
+		cmd := exec.Command("gofmt", "-w", path)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			log.Info("gofmt warning for %s: %s", path, string(output))
+			// Don't fail, just warn - the file might have syntax errors
+		}
+		return nil
+	})
+}
+
 // runGoBuild runs go build in the output directory
 func runGoBuild(outputDir string) error {
 	cmd := exec.Command("go", "build", "./...")
 	cmd.Dir = outputDir
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("go build failed: %v", err)
+	}
+	return nil
+}
+
+// runCargoCheck runs cargo check in the output directory for Rust projects
+func runCargoCheck(outputDir string) error {
+	// Check if Cargo.toml exists
+	cargoToml := filepath.Join(outputDir, "Cargo.toml")
+	if _, err := os.Stat(cargoToml); os.IsNotExist(err) {
+		return fmt.Errorf("Cargo.toml not found")
+	}
+
+	cmd := exec.Command("cargo", "check")
+	cmd.Dir = outputDir
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("cargo check failed: %v", err)
 	}
 	return nil
 }
