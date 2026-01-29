@@ -19,7 +19,6 @@ package tool
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -68,17 +67,11 @@ func NewASTTranslateTools(opts ASTTranslateToolsOptions) *ASTTranslateTools {
 		tools: map[string]tool.InvokableTool{},
 	}
 
-	// Load repos (similar to ASTReadTools)
-	files, err := filepath.Glob(filepath.Join(opts.RepoASTsDir, "*.json"))
-	if err != nil {
+	// load all *.json repos from RepoASTsDir (lenient: log and skip failed files)
+	if err := LoadReposIntoMap(opts.RepoASTsDir, &ret.repos, func(file string, err error) {
+		log.Error("Load Uniast JSON file failed: %v", err)
+	}); err != nil {
 		panic(err)
-	}
-	for _, f := range files {
-		if repo, err := uniast.LoadRepo(f); err != nil {
-			log.Error("Load Uniast JSON file failed: %v", err)
-		} else {
-			ret.repos.Store(repo.Name, repo)
-		}
 	}
 
 	// Register tools

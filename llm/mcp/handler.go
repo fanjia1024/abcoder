@@ -60,6 +60,8 @@ func getASTTools(opts tool.ASTReadToolsOptions) []Tool {
 	return []Tool{
 		NewTool(tool.ToolListRepos, tool.DescListRepos, tool.SchemaListRepos, ast.ListRepos),
 		NewTool(tool.ToolGetRepoStructure, tool.DescGetRepoStructure, tool.SchemaGetRepoStructure, ast.GetRepoStructure),
+		NewTool(tool.ToolGetASTHierarchy, tool.DescGetASTHierarchy, tool.SchemaGetASTHierarchy, ast.GetASTHierarchy),
+		NewTool(tool.ToolGetTargetLanguageSpec, tool.DescGetTargetLanguageSpec, tool.SchemaGetTargetLanguageSpec, ast.GetTargetLanguageSpec),
 		NewTool(tool.ToolGetPackageStructure, tool.DescGetPackageStructure, tool.SchemaGetPackageStructure, ast.GetPackageStructure),
 		NewTool(tool.ToolGetFileStructure, tool.DescGetFileStructure, tool.SchemaGetFileStructure, ast.GetFileStructure),
 		NewTool(tool.ToolGetASTNode, tool.DescGetASTNode, tool.SchemaGetASTNode, ast.GetASTNode),

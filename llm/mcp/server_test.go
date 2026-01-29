@@ -58,7 +58,7 @@ func sendAndRecv(t *testing.T, initRequest any, stdinWriter *io.PipeWriter, stdo
 func TestASTServer(t *testing.T) {
 	alog.SetLogLevel(alog.DebugLevel)
 	astOpts := tool.ASTReadToolsOptions{
-		RepoASTsDir: "../../testdata/asts",
+		RepoASTsDir: tool.TestRepoASTsDir,
 	}
 	svr := NewServer(ServerOptions{
 		ServerName:          "abcoder",

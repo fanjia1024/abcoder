@@ -19,7 +19,6 @@ package tool
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"testing"
 )
 
@@ -46,32 +45,15 @@ func TestMCPClient(t *testing.T) {
 }
 
 func TestGetGitTools(t *testing.T) {
-	type args struct {
-		ctx context.Context
+	got, err := GetGitTools(context.Background())
+	if err != nil {
+		t.Skipf("GetGitTools requires git MCP (uvx/mcp-server-git): %v", err)
 	}
-	tests := []struct {
-		name    string
-		args    args
-		want    []Tool
-		wantErr bool
-	}{
-		{
-			name: "test",
-			args: args{
-				ctx: context.Background(),
-			},
-		},
+	if got == nil {
+		t.Fatal("GetGitTools() returned nil slice")
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := GetGitTools(tt.args.ctx)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("GetGitTools() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("GetGitTools() = %v, want %v", got, tt.want)
-			}
-		})
+	// When MCP is available, tools may be non-empty; we only assert a valid response.
+	if len(got) > 0 {
+		t.Logf("GetGitTools() returned %d tool(s)", len(got))
 	}
 }

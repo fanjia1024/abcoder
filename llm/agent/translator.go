@@ -31,8 +31,9 @@ import (
 
 type TranslatorOptions struct {
 	llm.ModelConfig
-	MaxSteps int    `json:"max_steps"`
-	ASTsDir  string `json:"asts_dir"`
+	MaxSteps                int    `json:"max_steps"`
+	ASTsDir                 string `json:"asts_dir"`
+	UseHierarchicalStrategy bool   `json:"use_hierarchical_strategy"` // when true, emphasize get_ast_hierarchy + get_target_language_spec then translate by level
 }
 
 func NewTranslatorAgent(ctx context.Context, opts TranslatorOptions) *llm.ReactAgent {
@@ -71,8 +72,12 @@ func NewTranslatorAgent(ctx context.Context, opts TranslatorOptions) *llm.ReactA
 		tcfg.Tools = append(tcfg.Tools, t.(etool.BaseTool))
 	}
 
+	sysPrompt := prompt.PromptTranslator
+	if opts.UseHierarchicalStrategy {
+		sysPrompt = sysPrompt + "\n\n" + prompt.HierarchicalTranslationAppendix
+	}
 	return llm.NewReactAgent("translator", llm.ReactAgentOptions{
-		SysPrompt: prompt.NewTextPrompt(prompt.PromptTranslator),
+		SysPrompt: prompt.NewTextPrompt(sysPrompt),
 		AgentConfig: &react.AgentConfig{
 			ToolCallingModel: exeModel,
 			ToolsConfig:      tcfg,

@@ -25,6 +25,7 @@ import (
 
 	"github.com/cloudwego/abcoder/llm"
 	"github.com/cloudwego/abcoder/llm/log"
+	"github.com/cloudwego/abcoder/llm/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/flow/agent"
 	"github.com/cloudwego/eino/schema"
@@ -46,7 +47,7 @@ func TestAnalyzer(t *testing.T) {
 			MaxTokens: 1024 * 128,
 		},
 		MaxSteps: 100,
-		ASTsDir:  "../../testdata/asts",
+		ASTsDir:  tool.TestRepoASTsDir,
 	})
 	msgs, err := repoAnnalyzer.Generate(context.Background(), []*schema.Message{{
 		Role:    schema.User,

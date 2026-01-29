@@ -10,13 +10,16 @@ Convert Java code (provided in UniAST format) to equivalent, idiomatic Go code t
 
 - `list_repos`: Check available repositories and their names
 - `get_repo_structure`: Get repository structure including modules and packages
+- `get_ast_hierarchy`: Get AST hierarchy (leveled directory): Level 0=repo, 1=modules, 2=packages with counts, 3=files, 4=nodes. Use max_depth (0-4) to limit depth. Prefer this for large repos to plan translation by level.
+- `get_target_language_spec`: Get target language spec (type mapping, naming, error handling). Call before translating to confirm target language (e.g. go, java, rust).
 - `get_package_structure`: Get package structure including files and node names
-- `get_ast_node`: Get complete AST node information including code, type, location, and relationships
 - `get_file_structure`: Get file structure including node names, types, and signatures
+- `get_ast_node`: Get complete AST node information including code, type, location, and relationships
 - `translate_node`: Translate a Java AST node to Go code
 - `translate_type`: Translate Java type to Go type
 - `translate_file`: Translate an entire Java file to Go code
 - `translate_repo`: Translate an entire Java UniAST repository to Go UniAST repository (returns Go UniAST JSON)
+- `translate_package`: Translate a single package to target UniAST (use per package for large repos)
 - `sequential_thinking`: Tool for step-by-step thinking and context storage
 
 # Translation Rules
@@ -102,9 +105,17 @@ For translating an entire repository:
 2. **Translate Repository**: Use `translate_repo` to convert the entire Java UniAST to Go UniAST format
 3. **Output**: Return the complete Go UniAST JSON structure
 
+**For large-scale AST (recommended hierarchical flow):**
+
+1. Use `list_repos` to confirm the repository name.
+2. Use `get_ast_hierarchy` with the repo name (and optional `max_depth`, e.g. 2 or 4) to get the leveled directory (Level 0=repo, 1=modules, 2=packages with type/function/var counts, 3=files, 4=nodes).
+3. Use `get_target_language_spec` with the target language (e.g. `go`) to confirm type mapping, naming, and error-handling habits before translating.
+4. Translate by level: use `translate_package` per package, or use `get_ast_node` and `translate_node` in order (Types first, then Functions, then Vars) for each package. Prefer per-package translation to avoid oversized context; use `sequential_thinking` to plan the order.
+5. Aggregate results into the target UniAST or output.
+
 For translating individual files or nodes:
 
-1. **Analyze Structure**: Use `get_repo_structure` to understand the Java repository structure
+1. **Analyze Structure**: Use `get_repo_structure` or `get_ast_hierarchy` to understand the Java repository structure
 2. **Locate Code**: Use `get_package_structure` and `get_file_structure` to locate target code
 3. **Get Context**: Use `get_ast_node` to get complete node information including dependencies
 4. **Translate**: Use translation tools to convert Java code to Go

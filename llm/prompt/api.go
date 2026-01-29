@@ -95,3 +95,11 @@ var PromptAnalyzeRepo string
 
 //go:embed translator.md
 var PromptTranslator string
+
+// HierarchicalTranslationAppendix is appended to the system prompt when UseHierarchicalStrategy is true.
+const HierarchicalTranslationAppendix = `# Hierarchical Strategy (active)
+
+You MUST use the hierarchical flow for this translation:
+1. Call get_ast_hierarchy(repo_name, max_depth) to get the leveled directory (use max_depth 2 or 4 for large repos).
+2. Call get_target_language_spec(target_language) to confirm type mapping and naming before translating.
+3. Translate by level: use translate_package for each package, or translate in order Types → Functions → Vars per package. Prefer per-package translation; avoid loading the entire AST at once. Use sequential_thinking to plan the order.`

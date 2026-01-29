@@ -59,22 +59,18 @@ func NewCoordinator(ctx context.Context, registry *skill.Registry, model llm.Cha
 		// 使用工具名称常量来映射
 		allTools[tool.ToolListRepos] = astTools.GetTool(tool.ToolListRepos)
 		allTools[tool.ToolGetRepoStructure] = astTools.GetTool(tool.ToolGetRepoStructure)
+		allTools[tool.ToolGetASTHierarchy] = astTools.GetTool(tool.ToolGetASTHierarchy)
+		allTools[tool.ToolGetTargetLanguageSpec] = astTools.GetTool(tool.ToolGetTargetLanguageSpec)
 		allTools[tool.ToolGetPackageStructure] = astTools.GetTool(tool.ToolGetPackageStructure)
 		allTools[tool.ToolGetFileStructure] = astTools.GetTool(tool.ToolGetFileStructure)
 		allTools[tool.ToolGetASTNode] = astTools.GetTool(tool.ToolGetASTNode)
 	}
 
-	// Sequential thinking 工具
-	// 注意：sequential thinking 工具的名称通常是 "sequential_thinking"
-	// 我们直接添加到工具映射中
+	// Sequential thinking 工具（通常只有一个，名称固定为 sequential_thinking）
 	thinkingTools, err := tool.GetSequentialThinkingTools(ctx)
 	if err == nil {
 		for _, t := range thinkingTools {
-			if toolImpl, ok := t.(tool.Tool); ok {
-				// sequential thinking 工具通常只有一个，名称固定
-				// 如果 skill 需要这个工具，会在 allowed-tools 中指定 "sequential_thinking"
-				allTools["sequential_thinking"] = toolImpl
-			}
+			allTools["sequential_thinking"] = t
 		}
 	}
 

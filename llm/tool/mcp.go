@@ -106,12 +106,15 @@ func (c *MCPClient) GetTools(ctx context.Context) ([]Tool, error) {
 	return tools, nil
 }
 
-var seqThinkCli *MCPClient
+var (
+	seqThinkCli  *MCPClient
+	seqThinkOnce sync.Once
+)
 
 func GetSequentialThinkingTools(ctx context.Context) ([]Tool, error) {
-	sync.OnceFunc(func() {
+	seqThinkOnce.Do(func() {
 		cli, err := NewMCPClient(MCPConfig{
-			Type:   MCPTypeStdio,
+			Type:    MCPTypeStdio,
 			Command: "npx",
 			Args: []string{
 				"-y",
@@ -121,34 +124,33 @@ func GetSequentialThinkingTools(ctx context.Context) ([]Tool, error) {
 		if err != nil {
 			panic(err)
 		}
-		err = cli.Start(ctx)
-		if err != nil {
+		if err = cli.Start(ctx); err != nil {
 			panic(err)
 		}
 		seqThinkCli = cli
-	})()
+	})
 	return seqThinkCli.GetTools(ctx)
 }
 
-var gitCli *MCPClient
+var (
+	gitCli  *MCPClient
+	gitOnce sync.Once
+)
 
 func GetGitTools(ctx context.Context) ([]Tool, error) {
-	sync.OnceFunc(func() {
+	gitOnce.Do(func() {
 		cli, err := NewMCPClient(MCPConfig{
-			Type:   MCPTypeStdio,
+			Type:    MCPTypeStdio,
 			Command: "uvx",
-			Args: []string{
-				"mcp-server-git",
-			},
+			Args:    []string{"mcp-server-git"},
 		})
 		if err != nil {
 			panic(err)
 		}
-		err = cli.Start(ctx)
-		if err != nil {
+		if err = cli.Start(ctx); err != nil {
 			panic(err)
 		}
 		gitCli = cli
-	})()
+	})
 	return gitCli.GetTools(ctx)
 }

@@ -24,7 +24,7 @@ import (
 // 使用 all: 前缀来包含所有文件（包括以 . 开头的文件）
 //
 //go:embed all:algorithmic-art all:brand-guidelines all:canvas-design
-//go:embed all:code-analysis all:code-review all:code-translation
+//go:embed all:code-analysis all:code-review all:code-translation all:hierarchical-translation
 //go:embed all:doc-coauthoring all:doc-generation all:docx
 //go:embed all:frontend-design all:internal-comms all:mcp-builder
 //go:embed all:pdf all:pptx all:skill-creator all:slack-gif-creator
@@ -38,6 +38,7 @@ func SkillPaths() []string {
 		// abcoder 原生 skills（代码相关）
 		"code-analysis/SKILL.md",
 		"code-translation/SKILL.md",
+		"hierarchical-translation/SKILL.md",
 		"code-review/SKILL.md",
 		"doc-generation/SKILL.md",
 		"test-generation/SKILL.md",
@@ -74,6 +75,7 @@ func SkillCategories() map[string][]string {
 		"Code & Development": {
 			"code-analysis",
 			"code-translation",
+			"hierarchical-translation",
 			"code-review",
 			"doc-generation",
 			"test-generation",

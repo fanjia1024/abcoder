@@ -71,18 +71,9 @@ func NewASTReadTools(opts ASTReadToolsOptions) *ASTReadTools {
 		tools: map[string]tool.InvokableTool{},
 	}
 
-	// read all *.json files in opts.RepoASTsDir
-	files, err := filepath.Glob(filepath.Join(opts.RepoASTsDir, "*.json"))
-	if err != nil {
-		panic(err)
-	}
-	for _, f := range files {
-		// parse json
-		if repo, err := uniast.LoadRepo(f); err != nil {
-			panic("Load Uniast JSON file failed: " + err.Error())
-		} else {
-			ret.repos.Store(repo.Name, repo)
-		}
+	// load all *.json repos from RepoASTsDir (strict: first load error panics)
+	if err := LoadReposIntoMap(opts.RepoASTsDir, &ret.repos, nil); err != nil {
+		panic("Load Uniast JSON file failed: " + err.Error())
 	}
 
 	// add a file watch on the RepoASTsDir
@@ -150,6 +141,27 @@ func NewASTReadTools(opts ASTReadToolsOptions) *ASTReadTools {
 		panic(err)
 	}
 	ret.tools[ToolGetASTNode] = tt
+
+	tt, err = utils.InferTool(ToolGetASTHierarchy,
+		DescGetASTHierarchy,
+		ret.GetASTHierarchy, utils.WithMarshalOutput(func(ctx context.Context, output interface{}) (string, error) {
+			return abutil.MarshalJSONIndent(output)
+		}))
+	if err != nil {
+		panic(err)
+	}
+	ret.tools[ToolGetASTHierarchy] = tt
+
+	tt, err = utils.InferTool(ToolGetTargetLanguageSpec,
+		DescGetTargetLanguageSpec,
+		ret.GetTargetLanguageSpec, utils.WithMarshalOutput(func(ctx context.Context, output interface{}) (string, error) {
+			return abutil.MarshalJSONIndent(output)
+		}))
+	if err != nil {
+		panic(err)
+	}
+	ret.tools[ToolGetTargetLanguageSpec] = tt
+
 	return ret
 }
 
@@ -514,4 +526,18 @@ func (t *ASTReadTools) GetASTNode(_ context.Context, params GetASTNodeReq) (*Get
 
 	log.Debug("get repo structure, resp: %v", abutil.MarshalJSONIndentNoError(resp))
 	return resp, nil
+}
+
+// GetASTHierarchy returns the AST hierarchy (leveled directory) of the repository.
+func (t *ASTReadTools) GetASTHierarchy(_ context.Context, req GetASTHierarchyReq) (*GetASTHierarchyResp, error) {
+	repo, err := t.getRepoAST(req.RepoName)
+	if err != nil {
+		return &GetASTHierarchyResp{Error: err.Error()}, nil
+	}
+	return BuildASTHierarchy(repo, req.MaxDepth), nil
+}
+
+// GetTargetLanguageSpec returns the target language specification summary.
+func (t *ASTReadTools) GetTargetLanguageSpec(_ context.Context, req GetTargetLanguageSpecReq) (*GetTargetLanguageSpecResp, error) {
+	return GetTargetLanguageSpecContent(req.TargetLanguage), nil
 }
