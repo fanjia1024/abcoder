@@ -70,11 +70,24 @@ func (t *BaseTransformer) Transform(ctx context.Context, src *uniast.Repository)
 	// Use "." as Dir to indicate this is a local module (not external)
 	targetMod := uniast.NewModule(targetModName, ".", t.opts.TargetLanguage)
 
+	// Optional result for node-granular outcome (failed nodes, success cache)
+	if t.opts.Result != nil {
+		if t.opts.Result.TranslatedIDs == nil {
+			t.opts.Result.TranslatedIDs = make(map[string]struct{})
+		}
+		t.opts.Result.FailedNodes = nil
+	}
+	maxRetry := t.opts.MaxRetryPerNode
+	if maxRetry < 1 {
+		maxRetry = 1
+	}
+
 	// Global translate context for tracking all translated nodes
 	globalCtx := &TranslateContext{
 		SourceRepo:      src,
 		TargetRepo:      targetRepo,
 		TranslatedNodes: make(map[string]uniast.Identity),
+		Result:          t.opts.Result,
 	}
 
 	// 3. Traverse all source modules and merge their packages into the single target module
@@ -101,25 +114,13 @@ func (t *BaseTransformer) Transform(ctx context.Context, src *uniast.Repository)
 				Module:          targetMod,
 				Package:         targetPkg,
 				TranslatedNodes: globalCtx.TranslatedNodes,
+				Result:          globalCtx.Result,
 			}
 
-			// Translate in order: Types -> Functions -> Vars
-			// This ensures dependencies are translated first
-
-			// Translate types
-			if err := t.translateTypes(ctx, srcPkg, targetPkg, pkgCtx); err != nil {
-				return nil, err
-			}
-
-			// Translate functions
-			if err := t.translateFunctions(ctx, srcPkg, targetPkg, pkgCtx); err != nil {
-				return nil, err
-			}
-
-			// Translate variables
-			if err := t.translateVars(ctx, srcPkg, targetPkg, pkgCtx); err != nil {
-				return nil, err
-			}
+			// Translate in order: Types -> Functions -> Vars (one node = one retry unit; failures recorded, continue)
+			t.translateTypes(ctx, srcPkg, targetPkg, pkgCtx, maxRetry)
+			t.translateFunctions(ctx, srcPkg, targetPkg, pkgCtx, maxRetry)
+			t.translateVars(ctx, srcPkg, targetPkg, pkgCtx, maxRetry)
 
 			targetMod.Packages[uniast.PkgPath(targetPkgPath)] = targetPkg
 		}
@@ -195,179 +196,248 @@ func sanitizeModuleName(name string) string {
 	return name
 }
 
-// translateTypes translates all types in a package
-func (t *BaseTransformer) translateTypes(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext) error {
+// translateTypes translates all types in a package. One node = one retry unit; failures are recorded, translation continues.
+func (t *BaseTransformer) translateTypes(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext, maxRetry int) {
 	if t.opts.Parallel && t.opts.Concurrency > 1 {
-		return t.translateTypesParallel(ctx, srcPkg, targetPkg, tctx)
+		t.translateTypesParallel(ctx, srcPkg, targetPkg, tctx, maxRetry)
+		return
 	}
-	return t.translateTypesSequential(ctx, srcPkg, targetPkg, tctx)
+	t.translateTypesSequential(ctx, srcPkg, targetPkg, tctx, maxRetry)
 }
 
-func (t *BaseTransformer) translateTypesSequential(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext) error {
-	for name, srcType := range srcPkg.Types {
-		targetType, err := t.nodeTranslator.TranslateType(ctx, srcType, tctx)
+func (t *BaseTransformer) translateTypesSequential(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext, maxRetry int) {
+	for _, srcType := range srcPkg.Types {
+		if tctx.Result != nil && t.opts.AlreadyTranslatedIDs != nil {
+			if _, ok := t.opts.AlreadyTranslatedIDs[srcType.Identity.Full()]; ok {
+				continue
+			}
+		}
+		var targetType *uniast.Type
+		var err error
+		for attempt := 0; attempt < maxRetry; attempt++ {
+			targetType, err = t.nodeTranslator.TranslateType(ctx, srcType, tctx)
+			if err == nil {
+				break
+			}
+		}
 		if err != nil {
-			return fmt.Errorf("translate type %s failed: %w", name, err)
+			if tctx.Result != nil {
+				tctx.Result.FailedNodes = append(tctx.Result.FailedNodes, FailedNodeInfo{
+					NodeID: srcType.Identity.Full(), Attempts: maxRetry, Err: err.Error(),
+				})
+			}
+			continue
 		}
 		targetPkg.Types[targetType.Name] = targetType
-
-		// Record translated node
 		tctx.AddTranslatedNode(srcType.Identity, targetType.Identity)
+		if tctx.Result != nil {
+			tctx.Result.TranslatedIDs[srcType.Identity.Full()] = struct{}{}
+		}
 	}
-	return nil
 }
 
-func (t *BaseTransformer) translateTypesParallel(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext) error {
+func (t *BaseTransformer) translateTypesParallel(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext, maxRetry int) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	errCh := make(chan error, len(srcPkg.Types))
 	semaphore := make(chan struct{}, t.opts.Concurrency)
 
-	for name, srcType := range srcPkg.Types {
+	for _, srcType := range srcPkg.Types {
 		wg.Add(1)
-		go func(name string, srcType *uniast.Type) {
+		go func(srcType *uniast.Type) {
 			defer wg.Done()
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
-			targetType, err := t.nodeTranslator.TranslateType(ctx, srcType, tctx)
+			var targetType *uniast.Type
+			var err error
+			for attempt := 0; attempt < maxRetry; attempt++ {
+				targetType, err = t.nodeTranslator.TranslateType(ctx, srcType, tctx)
+				if err == nil {
+					break
+				}
+			}
 			if err != nil {
-				errCh <- fmt.Errorf("translate type %s failed: %w", name, err)
+				if tctx.Result != nil {
+					mu.Lock()
+					tctx.Result.FailedNodes = append(tctx.Result.FailedNodes, FailedNodeInfo{
+						NodeID: srcType.Identity.Full(), Attempts: maxRetry, Err: err.Error(),
+					})
+					mu.Unlock()
+				}
 				return
 			}
-
 			mu.Lock()
 			targetPkg.Types[targetType.Name] = targetType
 			tctx.AddTranslatedNode(srcType.Identity, targetType.Identity)
+			if tctx.Result != nil {
+				tctx.Result.TranslatedIDs[srcType.Identity.Full()] = struct{}{}
+			}
 			mu.Unlock()
-		}(name, srcType)
+		}(srcType)
 	}
-
 	wg.Wait()
-	close(errCh)
-
-	for err := range errCh {
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
-// translateFunctions translates all functions in a package
-func (t *BaseTransformer) translateFunctions(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext) error {
+// translateFunctions translates all functions in a package. One node = one retry unit; failures recorded, continue.
+func (t *BaseTransformer) translateFunctions(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext, maxRetry int) {
 	if t.opts.Parallel && t.opts.Concurrency > 1 {
-		return t.translateFunctionsParallel(ctx, srcPkg, targetPkg, tctx)
+		t.translateFunctionsParallel(ctx, srcPkg, targetPkg, tctx, maxRetry)
+		return
 	}
-	return t.translateFunctionsSequential(ctx, srcPkg, targetPkg, tctx)
+	t.translateFunctionsSequential(ctx, srcPkg, targetPkg, tctx, maxRetry)
 }
 
-func (t *BaseTransformer) translateFunctionsSequential(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext) error {
-	for name, srcFunc := range srcPkg.Functions {
-		targetFunc, err := t.nodeTranslator.TranslateFunction(ctx, srcFunc, tctx)
+func (t *BaseTransformer) translateFunctionsSequential(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext, maxRetry int) {
+	for _, srcFunc := range srcPkg.Functions {
+		if tctx.Result != nil && t.opts.AlreadyTranslatedIDs != nil {
+			if _, ok := t.opts.AlreadyTranslatedIDs[srcFunc.Identity.Full()]; ok {
+				continue
+			}
+		}
+		var targetFunc *uniast.Function
+		var err error
+		for attempt := 0; attempt < maxRetry; attempt++ {
+			targetFunc, err = t.nodeTranslator.TranslateFunction(ctx, srcFunc, tctx)
+			if err == nil {
+				break
+			}
+		}
 		if err != nil {
-			return fmt.Errorf("translate function %s failed: %w", name, err)
+			if tctx.Result != nil {
+				tctx.Result.FailedNodes = append(tctx.Result.FailedNodes, FailedNodeInfo{
+					NodeID: srcFunc.Identity.Full(), Attempts: maxRetry, Err: err.Error(),
+				})
+			}
+			continue
 		}
 		targetPkg.Functions[targetFunc.Name] = targetFunc
-
-		// Record translated node
 		tctx.AddTranslatedNode(srcFunc.Identity, targetFunc.Identity)
+		if tctx.Result != nil {
+			tctx.Result.TranslatedIDs[srcFunc.Identity.Full()] = struct{}{}
+		}
 	}
-	return nil
 }
 
-func (t *BaseTransformer) translateFunctionsParallel(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext) error {
+func (t *BaseTransformer) translateFunctionsParallel(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext, maxRetry int) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	errCh := make(chan error, len(srcPkg.Functions))
 	semaphore := make(chan struct{}, t.opts.Concurrency)
 
-	for name, srcFunc := range srcPkg.Functions {
+	for _, srcFunc := range srcPkg.Functions {
 		wg.Add(1)
-		go func(name string, srcFunc *uniast.Function) {
+		go func(srcFunc *uniast.Function) {
 			defer wg.Done()
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
-			targetFunc, err := t.nodeTranslator.TranslateFunction(ctx, srcFunc, tctx)
+			var targetFunc *uniast.Function
+			var err error
+			for attempt := 0; attempt < maxRetry; attempt++ {
+				targetFunc, err = t.nodeTranslator.TranslateFunction(ctx, srcFunc, tctx)
+				if err == nil {
+					break
+				}
+			}
 			if err != nil {
-				errCh <- fmt.Errorf("translate function %s failed: %w", name, err)
+				if tctx.Result != nil {
+					mu.Lock()
+					tctx.Result.FailedNodes = append(tctx.Result.FailedNodes, FailedNodeInfo{
+						NodeID: srcFunc.Identity.Full(), Attempts: maxRetry, Err: err.Error(),
+					})
+					mu.Unlock()
+				}
 				return
 			}
-
 			mu.Lock()
 			targetPkg.Functions[targetFunc.Name] = targetFunc
 			tctx.AddTranslatedNode(srcFunc.Identity, targetFunc.Identity)
+			if tctx.Result != nil {
+				tctx.Result.TranslatedIDs[srcFunc.Identity.Full()] = struct{}{}
+			}
 			mu.Unlock()
-		}(name, srcFunc)
+		}(srcFunc)
 	}
-
 	wg.Wait()
-	close(errCh)
-
-	for err := range errCh {
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
-// translateVars translates all variables in a package
-func (t *BaseTransformer) translateVars(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext) error {
+// translateVars translates all variables in a package. One node = one retry unit; failures recorded, continue.
+func (t *BaseTransformer) translateVars(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext, maxRetry int) {
 	if t.opts.Parallel && t.opts.Concurrency > 1 {
-		return t.translateVarsParallel(ctx, srcPkg, targetPkg, tctx)
+		t.translateVarsParallel(ctx, srcPkg, targetPkg, tctx, maxRetry)
+		return
 	}
-	return t.translateVarsSequential(ctx, srcPkg, targetPkg, tctx)
+	t.translateVarsSequential(ctx, srcPkg, targetPkg, tctx, maxRetry)
 }
 
-func (t *BaseTransformer) translateVarsSequential(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext) error {
-	for name, srcVar := range srcPkg.Vars {
-		targetVar, err := t.nodeTranslator.TranslateVar(ctx, srcVar, tctx)
+func (t *BaseTransformer) translateVarsSequential(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext, maxRetry int) {
+	for _, srcVar := range srcPkg.Vars {
+		if tctx.Result != nil && t.opts.AlreadyTranslatedIDs != nil {
+			if _, ok := t.opts.AlreadyTranslatedIDs[srcVar.Identity.Full()]; ok {
+				continue
+			}
+		}
+		var targetVar *uniast.Var
+		var err error
+		for attempt := 0; attempt < maxRetry; attempt++ {
+			targetVar, err = t.nodeTranslator.TranslateVar(ctx, srcVar, tctx)
+			if err == nil {
+				break
+			}
+		}
 		if err != nil {
-			return fmt.Errorf("translate var %s failed: %w", name, err)
+			if tctx.Result != nil {
+				tctx.Result.FailedNodes = append(tctx.Result.FailedNodes, FailedNodeInfo{
+					NodeID: srcVar.Identity.Full(), Attempts: maxRetry, Err: err.Error(),
+				})
+			}
+			continue
 		}
 		targetPkg.Vars[targetVar.Name] = targetVar
-
-		// Record translated node
 		tctx.AddTranslatedNode(srcVar.Identity, targetVar.Identity)
+		if tctx.Result != nil {
+			tctx.Result.TranslatedIDs[srcVar.Identity.Full()] = struct{}{}
+		}
 	}
-	return nil
 }
 
-func (t *BaseTransformer) translateVarsParallel(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext) error {
+func (t *BaseTransformer) translateVarsParallel(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext, maxRetry int) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	errCh := make(chan error, len(srcPkg.Vars))
 	semaphore := make(chan struct{}, t.opts.Concurrency)
 
-	for name, srcVar := range srcPkg.Vars {
+	for _, srcVar := range srcPkg.Vars {
 		wg.Add(1)
-		go func(name string, srcVar *uniast.Var) {
+		go func(srcVar *uniast.Var) {
 			defer wg.Done()
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
-			targetVar, err := t.nodeTranslator.TranslateVar(ctx, srcVar, tctx)
+			var targetVar *uniast.Var
+			var err error
+			for attempt := 0; attempt < maxRetry; attempt++ {
+				targetVar, err = t.nodeTranslator.TranslateVar(ctx, srcVar, tctx)
+				if err == nil {
+					break
+				}
+			}
 			if err != nil {
-				errCh <- fmt.Errorf("translate var %s failed: %w", name, err)
+				if tctx.Result != nil {
+					mu.Lock()
+					tctx.Result.FailedNodes = append(tctx.Result.FailedNodes, FailedNodeInfo{
+						NodeID: srcVar.Identity.Full(), Attempts: maxRetry, Err: err.Error(),
+					})
+					mu.Unlock()
+				}
 				return
 			}
-
 			mu.Lock()
 			targetPkg.Vars[targetVar.Name] = targetVar
 			tctx.AddTranslatedNode(srcVar.Identity, targetVar.Identity)
+			if tctx.Result != nil {
+				tctx.Result.TranslatedIDs[srcVar.Identity.Full()] = struct{}{}
+			}
 			mu.Unlock()
-		}(name, srcVar)
+		}(srcVar)
 	}
-
 	wg.Wait()
-	close(errCh)
-
-	for err := range errCh {
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }

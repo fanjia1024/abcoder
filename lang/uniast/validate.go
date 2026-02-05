@@ -150,12 +150,12 @@ func validateModuleWithResult(modName string, mod *Module) []ValidationErrorItem
 			})
 			continue
 		}
-		items = append(items, validatePackageWithResult(modName, pkgPath, pkg)...)
+		items = append(items, validatePackageWithResult(modName, pkgPath, pkg, mod.Language)...)
 	}
 	return items
 }
 
-func validatePackageWithResult(modName, pkgPath string, pkg *Package) []ValidationErrorItem {
+func validatePackageWithResult(modName, pkgPath string, pkg *Package, lang Language) []ValidationErrorItem {
 	var items []ValidationErrorItem
 	seenNames := make(map[string]string)
 
@@ -169,6 +169,8 @@ func validatePackageWithResult(modName, pkgPath string, pkg *Package) []Validati
 				continue
 			}
 			items = append(items, validateIdentityAndContentWithResult("function", modName, pkgPath, name, f.Identity, f.Content, f.FileLine)...)
+			items = append(items, validateFunctionStructure(modName, pkgPath, name, f)...)
+			items = append(items, validateFunctionTypeConsistency(modName, pkgPath, name, f)...)
 			if prev, ok := seenNames[f.Name]; ok {
 				items = append(items, ValidationErrorItem{
 					Message:  fmt.Sprintf("package %s#%s duplicate name %q (already used as %s)", modName, pkgPath, f.Name, prev),
@@ -225,7 +227,123 @@ func validatePackageWithResult(modName, pkgPath string, pkg *Package) []Validati
 		}
 	}
 
+	items = append(items, validateTargetLanguageConstraints(modName, pkgPath, pkg, lang)...)
 	return items
+}
+
+// validateTargetLanguageConstraints applies Fatal rules per target language (e.g. Go: no unused vars; Rust: placeholder).
+func validateTargetLanguageConstraints(modName, pkgPath string, pkg *Package, lang Language) []ValidationErrorItem {
+	switch lang {
+	case Golang:
+		return validateGoConstraints(modName, pkgPath, pkg)
+	case Rust:
+		// Rust: very rough "no dangling ref" or placeholder; not implemented without deeper analysis.
+		return nil
+	default:
+		return nil
+	}
+}
+
+// validateGoConstraints enforces Go-specific Fatal rules: e.g. no unused package-level variables (rough heuristic).
+func validateGoConstraints(modName, pkgPath string, pkg *Package) []ValidationErrorItem {
+	var items []ValidationErrorItem
+	if pkg.Vars == nil {
+		return items
+	}
+	// Build set of var names that appear in any function content or GlobalVars.
+	used := make(map[string]bool)
+	if pkg.Functions != nil {
+		for _, f := range pkg.Functions {
+			if f == nil {
+				continue
+			}
+			if f.Content != "" {
+				for vName := range pkg.Vars {
+					if strings.Contains(f.Content, vName) {
+						used[vName] = true
+					}
+				}
+			}
+			for _, g := range f.GlobalVars {
+				if g.Name != "" {
+					used[g.Name] = true
+				}
+			}
+		}
+	}
+	for vName, v := range pkg.Vars {
+		if v == nil {
+			continue
+		}
+		if !used[vName] {
+			items = append(items, ValidationErrorItem{
+				Message:  fmt.Sprintf("package %s#%s Go: unused variable %q", modName, pkgPath, vName),
+				Severity: SeverityFatal,
+				NodeID:   v.Identity.Full(),
+			})
+		}
+	}
+	return items
+}
+
+// validateFunctionStructure checks structure legality: return not at top-level (Fatal),
+// break/continue only inside loop (Recoverable rough check). Function body non-empty is enforced elsewhere.
+func validateFunctionStructure(modName, pkgPath, keyName string, f *Function) []ValidationErrorItem {
+	var items []ValidationErrorItem
+	if f == nil {
+		return items
+	}
+	trimmed := strings.TrimSpace(f.Content)
+	if trimmed == "" {
+		return items
+	}
+	// First non-empty line: if it is a return statement, that's return at top-level (Fatal).
+	lines := strings.Split(trimmed, "\n")
+	var firstLine string
+	for _, line := range lines {
+		s := strings.TrimSpace(line)
+		if s != "" {
+			firstLine = s
+			break
+		}
+	}
+	if firstLine == "return" || firstLine == "return;" || strings.HasPrefix(firstLine, "return ") || strings.HasPrefix(firstLine, "return;") {
+		items = append(items, ValidationErrorItem{
+			Message:  fmt.Sprintf("package %s#%s function %q has return at top-level", modName, pkgPath, keyName),
+			Severity: SeverityFatal,
+			NodeID:   f.Identity.Full(),
+		})
+	}
+	// Break/continue: rough check; "ensure inside loop" is not enforceable without full AST.
+	if strings.Contains(trimmed, "break") || strings.Contains(trimmed, "continue") {
+		items = append(items, ValidationErrorItem{
+			Message:  fmt.Sprintf("package %s#%s function %q contains break/continue; ensure inside loop", modName, pkgPath, keyName),
+			Severity: SeverityRecoverable,
+			NodeID:   f.Identity.Full(),
+		})
+	}
+	return items
+}
+
+// validateFunctionTypeConsistency adds minimal Recoverable checks: return type vs content (e.g. function
+// declares results but content may lack return). Variable use-before-def would require symbol table.
+func validateFunctionTypeConsistency(modName, pkgPath, keyName string, f *Function) []ValidationErrorItem {
+	if f == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(f.Content)
+	if trimmed == "" {
+		return nil
+	}
+	// Recoverable: function has return type but content may lack return statement.
+	if len(f.Results) > 0 && !strings.Contains(trimmed, "return") {
+		return []ValidationErrorItem{{
+			Message:  fmt.Sprintf("package %s#%s function %q declares return type but content may lack return", modName, pkgPath, keyName),
+			Severity: SeverityRecoverable,
+			NodeID:   f.Identity.Full(),
+		}}
+	}
+	return nil
 }
 
 // minContentLengthForRecoverable: content shorter than this may be incomplete LLM output (recoverable by retry).

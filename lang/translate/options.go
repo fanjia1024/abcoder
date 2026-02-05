@@ -47,6 +47,26 @@ type TranslateOptions struct {
 	GenerateEntryPoint bool
 	// GenerateConfig enables generation of project config files (default: true)
 	GenerateConfig bool
+
+	// MaxRetryPerNode is the number of retries per node on translate failure (default: 1). One node = one retry unit.
+	MaxRetryPerNode int
+	// Result, if non-nil, is filled with FailedNodes and TranslatedIDs after Transform (for observability and resume).
+	Result *TranslateResult
+	// AlreadyTranslatedIDs is an optional set of source node IDs to skip (success cache for resume).
+	AlreadyTranslatedIDs map[string]struct{}
+}
+
+// FailedNodeInfo records a node that failed translation after max retries.
+type FailedNodeInfo struct {
+	NodeID   string // source Identity.Full()
+	Attempts int
+	Err      string
+}
+
+// TranslateResult is filled by Transform when opts.Result is non-nil (node-granular outcome and cache).
+type TranslateResult struct {
+	FailedNodes   []FailedNodeInfo
+	TranslatedIDs map[string]struct{} // source Identity.Full() of successfully translated nodes
 }
 
 // LLMTranslateFunc is the callback function type for LLM translation
@@ -110,6 +130,8 @@ type TranslateContext struct {
 	TranslatedNodes map[string]uniast.Identity
 	// mu protects TranslatedNodes for concurrent read/write
 	mu sync.RWMutex
+	// Result, if non-nil, receives FailedNodes and TranslatedIDs (one node = one retry unit).
+	Result *TranslateResult
 }
 
 // NewTranslateContext creates a new TranslateContext

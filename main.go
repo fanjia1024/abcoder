@@ -44,6 +44,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cloudwego/abcoder/internal/pipeline"
 	"github.com/cloudwego/abcoder/lang"
 	"github.com/cloudwego/abcoder/lang/collect"
 	"github.com/cloudwego/abcoder/lang/log"
@@ -262,6 +263,23 @@ func main() {
 			log.SetLogLevel(log.DebugLevel)
 		}
 
+		// Pipeline state for this run (which step failed, attempt N, status)
+		pipelineState := &pipeline.PipelineState{
+			RunID:          fmt.Sprintf("%d", time.Now().UnixNano()),
+			SourceLang:     srcLang,
+			TargetLang:     dstLang,
+			SourceCodePath: uri,
+			OutputPath:     "",
+			History:        nil,
+		}
+		reportPipelineFailureAndExit := func() {
+			if n := len(pipelineState.History); n > 0 {
+				last := pipelineState.History[n-1]
+				log.Info("Pipeline: last step=%s, attempt=%d, status=%s\n", last.StepName, last.Attempt, last.Status)
+			}
+			os.Exit(1)
+		}
+
 		// Parse source project to UniAST
 		tempASTDir := filepath.Join(os.TempDir(), "abcoder-translate-asts")
 		os.MkdirAll(tempASTDir, 0755)
@@ -302,6 +320,14 @@ func main() {
 						existingUniASTPath = candidatePath
 						log.Info("Using existing UniAST: %s, skip parsing\n", candidatePath)
 					} else {
+						// User explicitly passed a .json path; failed load is fatal (don't fall back to parsing a file as directory)
+						if candidatePath == uri {
+							pipelineState.History = append(pipelineState.History, pipeline.StepRecord{
+								StepName: "parse", Attempt: 1, Status: pipeline.StepFailed, Error: err.Error(), Time: time.Now(),
+							})
+							log.Error("Failed to load UniAST from %s: %v\n", candidatePath, err)
+							reportPipelineFailureAndExit()
+						}
 						log.Info("Failed to load existing UniAST, will parse: %v\n", err)
 					}
 				}
@@ -310,32 +336,50 @@ func main() {
 		if !usedExistingUniAST {
 			if srcLang == uniast.TypeScript {
 				if err := parseTSProject(context.Background(), uri, parseOpts, &tempASTFile); err != nil {
+					pipelineState.History = append(pipelineState.History, pipeline.StepRecord{
+						StepName: "parse", Attempt: 1, Status: pipeline.StepFailed, Error: err.Error(), Time: time.Now(),
+					})
 					log.Error("Failed to parse TypeScript project: %v\n", err)
-					os.Exit(1)
+					reportPipelineFailureAndExit()
 				}
 				var err error
 				srcRepo, err = uniast.LoadRepo(tempASTFile)
 				if err != nil {
+					pipelineState.History = append(pipelineState.History, pipeline.StepRecord{
+						StepName: "parse", Attempt: 1, Status: pipeline.StepFailed, Error: err.Error(), Time: time.Now(),
+					})
 					log.Error("Failed to load TypeScript repository: %v\n", err)
-					os.Exit(1)
+					reportPipelineFailureAndExit()
 				}
 			} else {
 				astJSON, err := lang.Parse(context.Background(), uri, parseOpts)
 				if err != nil {
+					pipelineState.History = append(pipelineState.History, pipeline.StepRecord{
+						StepName: "parse", Attempt: 1, Status: pipeline.StepFailed, Error: err.Error(), Time: time.Now(),
+					})
 					log.Error("Failed to parse %s project: %v\n", srcLang, err)
-					os.Exit(1)
+					reportPipelineFailureAndExit()
 				}
 				if err := utils.MustWriteFile(tempASTFile, astJSON); err != nil {
+					pipelineState.History = append(pipelineState.History, pipeline.StepRecord{
+						StepName: "parse", Attempt: 1, Status: pipeline.StepFailed, Error: err.Error(), Time: time.Now(),
+					})
 					log.Error("Failed to write AST file: %v\n", err)
-					os.Exit(1)
+					reportPipelineFailureAndExit()
 				}
 				srcRepo, err = uniast.LoadRepo(tempASTFile)
 				if err != nil {
+					pipelineState.History = append(pipelineState.History, pipeline.StepRecord{
+						StepName: "parse", Attempt: 1, Status: pipeline.StepFailed, Error: err.Error(), Time: time.Now(),
+					})
 					log.Error("Failed to load %s repository: %v\n", srcLang, err)
-					os.Exit(1)
+					reportPipelineFailureAndExit()
 				}
 			}
 		}
+		pipelineState.History = append(pipelineState.History, pipeline.StepRecord{
+			StepName: "parse", Attempt: 1, Status: pipeline.StepOK, Time: time.Now(),
+		})
 		if usedExistingUniAST {
 			log.Info("%s UniAST: %s\n", srcLang, existingUniASTPath)
 		} else {
@@ -349,6 +393,7 @@ func main() {
 		} else {
 			outputDir = filepath.Base(uri) + "-" + string(dstLang)
 		}
+		pipelineState.OutputPath = outputDir
 
 		// Create output directory
 		if err := os.MkdirAll(outputDir, 0755); err != nil {
@@ -422,9 +467,15 @@ func main() {
 		// Use TranslateAST to get the target repo (so we can save it)
 		targetRepo, err := translate.TranslateAST(context.Background(), srcRepo, translateOpts)
 		if err != nil {
+			pipelineState.History = append(pipelineState.History, pipeline.StepRecord{
+				StepName: "transform", Attempt: 1, Status: pipeline.StepFailed, Error: err.Error(), Time: time.Now(),
+			})
 			log.Error("Failed to translate: %v\n", err)
-			os.Exit(1)
+			reportPipelineFailureAndExit()
 		}
+		pipelineState.History = append(pipelineState.History, pipeline.StepRecord{
+			StepName: "transform", Attempt: 1, Status: pipeline.StepOK, Time: time.Now(),
+		})
 
 		// Save target UniAST to JSON file
 		targetASTFile := filepath.Join(tempASTDir, fmt.Sprintf("%s-repo.json", dstLang))
@@ -441,17 +492,56 @@ func main() {
 
 		// Validate target UniAST before writing (reject invalid LLM output)
 		if err := uniast.ValidateRepository(targetRepo); err != nil {
+			pipelineState.History = append(pipelineState.History, pipeline.StepRecord{
+				StepName: "validate", Attempt: 1, Status: pipeline.StepFailed, Error: err.Error(), Time: time.Now(),
+			})
 			log.Error("UniAST validation failed (rejecting output): %v\n", err)
-			os.Exit(1)
+			reportPipelineFailureAndExit()
 		}
+		pipelineState.History = append(pipelineState.History, pipeline.StepRecord{
+			StepName: "validate", Attempt: 1, Status: pipeline.StepOK, Time: time.Now(),
+		})
+		// Snapshot target UniAST so rollback (e.g. on later failure) can restore; on Fatal validation we never reach here.
+		pipelineState.TargetUniAST = pipeline.NewSnapshot("target-uniast", targetRepo, targetASTJSON)
 
 		// Write target code using lang.Write
 		err = lang.Write(context.Background(), targetRepo, lang.WriteOptions{
 			OutputDir: outputDir,
 		})
 		if err != nil {
+			pipelineState.History = append(pipelineState.History, pipeline.StepRecord{
+				StepName: "write", Attempt: 1, Status: pipeline.StepFailed, Error: err.Error(), Time: time.Now(),
+			})
 			log.Error("Failed to write target code: %v\n", err)
-			os.Exit(1)
+			reportPipelineFailureAndExit()
+		}
+		pipelineState.History = append(pipelineState.History, pipeline.StepRecord{
+			StepName: "write", Attempt: 1, Status: pipeline.StepOK, Time: time.Now(),
+		})
+
+		// Report pipeline outcome (last step, attempt, status)
+		if n := len(pipelineState.History); n > 0 {
+			last := pipelineState.History[n-1]
+			log.Info("Pipeline: last step=%s, attempt=%d, status=%s\n", last.StepName, last.Attempt, last.Status)
+		}
+		if flagVerbose != nil && *flagVerbose {
+			for _, rec := range pipelineState.History {
+				if rec.Error != "" {
+					log.Debug("  step=%s attempt=%d status=%s error=%s\n", rec.StepName, rec.Attempt, rec.Status, rec.Error)
+				} else {
+					log.Debug("  step=%s attempt=%d status=%s\n", rec.StepName, rec.Attempt, rec.Status)
+				}
+			}
+		}
+		// Persist pipeline report (StepHistory) for observability
+		if reportPath := filepath.Join(outputDir, "abcoder-pipeline-report.json"); outputDir != "" {
+			report := struct {
+				RunID   string               `json:"run_id"`
+				History []pipeline.StepRecord `json:"history"`
+			}{RunID: pipelineState.RunID, History: pipelineState.History}
+			if reportJSON, err := json.MarshalIndent(report, "", "  "); err == nil {
+				_ = os.WriteFile(reportPath, reportJSON, 0644)
+			}
 		}
 
 		// Run target language specific post-processing
