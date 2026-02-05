@@ -18,6 +18,7 @@ package translate
 
 import (
 	"context"
+	"sync"
 
 	"github.com/cloudwego/abcoder/lang/uniast"
 )
@@ -105,7 +106,10 @@ type TranslateContext struct {
 	// Package is the current target package
 	Package *uniast.Package
 	// TranslatedNodes maps source identity to target identity for already translated nodes
+	// Access via AddTranslatedNode/GetTranslatedNode when used from parallel translation.
 	TranslatedNodes map[string]uniast.Identity
+	// mu protects TranslatedNodes for concurrent read/write
+	mu sync.RWMutex
 }
 
 // NewTranslateContext creates a new TranslateContext
@@ -119,13 +123,17 @@ func NewTranslateContext(srcRepo, targetRepo *uniast.Repository, mod *uniast.Mod
 	}
 }
 
-// AddTranslatedNode records a translated node mapping
+// AddTranslatedNode records a translated node mapping (safe for concurrent use)
 func (c *TranslateContext) AddTranslatedNode(sourceID, targetID uniast.Identity) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.TranslatedNodes[sourceID.Full()] = targetID
 }
 
-// GetTranslatedNode returns the target identity for a source identity
+// GetTranslatedNode returns the target identity for a source identity (safe for concurrent use)
 func (c *TranslateContext) GetTranslatedNode(sourceID uniast.Identity) (uniast.Identity, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	targetID, ok := c.TranslatedNodes[sourceID.Full()]
 	return targetID, ok
 }

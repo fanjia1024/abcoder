@@ -172,6 +172,10 @@ func (b *PromptBuilder) getTypeRequirements() string {
 - IMPORTANT: For cross-package types, use full package prefix (e.g., model.User, not just User)
 - Output ONLY the type definition, do NOT include duplicate struct/method definitions
 `
+	if b.source == uniast.TypeScript {
+		common = `- Source is TypeScript: convert interface to Go struct or interface; convert class to struct with methods; use exported (PascalCase) for public, unexported for private
+` + common
+	}
 
 	switch b.target {
 	case uniast.Golang:
@@ -214,6 +218,10 @@ func (b *PromptBuilder) getFunctionRequirements() string {
 - IMPORTANT: Use types from dependencies with proper package prefix (e.g., model.User)
 - Output ONLY the single function/method, do NOT include duplicate definitions
 `
+	if b.source == uniast.TypeScript {
+		common = `- Source is TypeScript: convert Promise<T> to (T, error) or return T; use Go error as last return; map async/await to synchronous Go or goroutines where appropriate
+` + common
+	}
 
 	switch b.target {
 	case uniast.Golang:

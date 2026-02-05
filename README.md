@@ -87,16 +87,31 @@ see [UniAST Specification](docs/uniast-zh.md)
 
 ## Translate Code Between Languages
 
-ABCoder can translate code from one language to another using LLM. Currently supports Java to Go translation:
+ABCoder can translate code from one language to another using LLM. Supported translation pairs include **Java to Go** and **TypeScript to Go** (and other combinations among Java, Go, Python, Rust, C++).
 
 ```bash
 export API_TYPE='{openai|ollama|ark|claude|dashscope|deepseek}' 
 export API_KEY='{your-api-key}' 
 export MODEL_NAME='{model-endpoint}' 
-abcoder translate java go {java-project-path} -o {output-dir}
+abcoder translate <src-lang> <dst-lang> <project-path> -o <output-dir>
 ```
 
-For example, using Claude:
+**TypeScript to Go** (requires `abcoder-ts-parser` installed, e.g. `npm install -g abcoder-ts-parser`):
+
+```bash
+abcoder translate ts go /path/to/your-ts-project -o ./output-go-project
+```
+
+For example, translating a local TypeScript project to Go:
+
+```bash
+export API_TYPE='claude'
+export API_KEY='your-anthropic-api-key'
+export MODEL_NAME='claude-sonnet-4-20250514'
+abcoder translate ts go /Users/jiafan/Desktop/poc/opencode -o ./opencode-go
+```
+
+**Java to Go** — for example, using Claude:
 
 ```bash
 export API_TYPE='claude'

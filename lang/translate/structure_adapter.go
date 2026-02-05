@@ -137,6 +137,22 @@ func (a *StructureAdapter) convertModuleName(name string) string {
 	case a.source == uniast.Rust && a.target == uniast.Python:
 		// example_project -> example.project
 		return strings.ReplaceAll(name, "_", ".")
+	case a.source == uniast.TypeScript && a.target == uniast.Golang:
+		// npm package name or path -> example.com/<name>
+		if name == "" {
+			return "example.com/app"
+		}
+		// Strip scope and path separators for module name
+		name = strings.TrimPrefix(name, "@")
+		if idx := strings.Index(name, "/"); idx >= 0 {
+			name = name[idx+1:]
+		}
+		name = strings.ReplaceAll(name, "/", "-")
+		name = strings.ReplaceAll(name, "\\", "-")
+		if name == "" {
+			return "example.com/app"
+		}
+		return "example.com/" + name
 	default:
 		return name
 	}
@@ -194,6 +210,17 @@ func (a *StructureAdapter) convertPackagePath(path string) string {
 	case a.source == uniast.Rust && a.target == uniast.Python:
 		// crate::module -> crate.module
 		return strings.ReplaceAll(path, "::", ".")
+	case a.source == uniast.TypeScript && a.target == uniast.Golang:
+		// src/services, utils, src -> last segment as Go package (e.g. services, utils, main)
+		path = strings.ReplaceAll(path, "\\", "/")
+		path = strings.TrimPrefix(path, "src/")
+		path = strings.TrimPrefix(path, "src")
+		path = strings.Trim(path, "/")
+		if path == "" {
+			return "main"
+		}
+		parts := strings.Split(path, "/")
+		return parts[len(parts)-1]
 	default:
 		return path
 	}

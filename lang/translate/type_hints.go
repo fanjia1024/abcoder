@@ -69,6 +69,8 @@ func (h *TypeHints) loadMappings() {
 		h.mappings = pythonToRustMappings()
 	case "rust->python":
 		h.mappings = rustToPythonMappings()
+	case "typescript->go", "ts->go":
+		h.mappings = typescriptToGoMappings()
 	default:
 		h.mappings = make(map[string]string)
 	}
@@ -137,6 +139,41 @@ func javaToGoMappings() map[string]string {
 		"LocalDate":  "time.Time",
 		"LocalDateTime": "time.Time",
 		"Instant":    "time.Time",
+	}
+}
+
+// TypeScript -> Go type mappings
+func typescriptToGoMappings() map[string]string {
+	return map[string]string{
+		// Primitives
+		"string":   "string",
+		"number":   "int64",
+		"boolean":  "bool",
+		"void":     "",
+		"null":     "nil",
+		"undefined": "zero value or omit",
+
+		// TS built-in / common
+		"any":       "any",
+		"unknown":   "interface{}",
+		"object":    "map[string]interface{}",
+		"never":     "// no Go equivalent",
+
+		// Arrays and collections
+		"Array<T>": "[]T",
+		"T[]":       "[]T",
+		"ReadonlyArray<T>": "[]T",
+		"Record<K,V>": "map[K]V",
+		"Map<K,V>":  "map[K]V",
+		"Set<T>":    "map[T]struct{}",
+
+		// Promise -> suggest goroutine/channel or return type
+		"Promise<T>": "T (or use goroutine/channel)",
+
+		// Common TS/JS
+		"Date":     "time.Time",
+		"Error":    "error",
+		"Promise":  "// use goroutine or return value",
 	}
 }
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ABCoder 多语言转换测试脚本
-# 支持: Java, Go, Python, Rust 之间的互相转换
+# 支持: Java, Go, Python, Rust, TypeScript 之间的互相转换
 
 set -e
 
@@ -27,9 +27,9 @@ NC='\033[0m' # No Color
 #   - ollama     (本地模型)
 
 # --- DashScope (通义千问) ---
-export API_TYPE="dashscope"
-export API_KEY="sk-810e9c55ef5948f58837c90eed07b8bc"
-export MODEL_NAME="qwen3-max"
+# export API_TYPE="dashscope"
+# export API_KEY="sk-810e9c55ef5948f58837c90eed07b8bc"
+# export MODEL_NAME="qwen3-max"
 # export BASE_URL=""  # 可选，使用默认值
 
 # --- OpenAI ---
@@ -55,10 +55,10 @@ export MODEL_NAME="qwen3-max"
 # export MODEL_NAME="your-endpoint-id"
 
 # --- Ollama (本地模型) ---
-# export API_TYPE="ollama"
-# export API_KEY=""
-# export MODEL_NAME="llama3"
-# export BASE_URL="http://localhost:11434"
+export API_TYPE="ollama"
+export API_KEY="demo"
+export MODEL_NAME="gpt-oss:120b"
+export BASE_URL="http://10.135.4.11:11434"
 
 # ============================================
 # 测试数据目录配置
@@ -67,8 +67,10 @@ JAVA_TEST_PROJECT="testdata/java/4_full_maven_repo"
 GO_TEST_PROJECT="testdata/go/0_goland"      # TODO: 添加 Go 测试项目
 PYTHON_TEST_PROJECT="testdata/python/7_reexport"      # TODO: 添加 Python 测试项目
 RUST_TEST_PROJECT="testdata/rust/1_simpleobj"          # TODO: 添加 Rust 测试项目
+# TypeScript 项目路径（需已安装 abcoder-ts-parser: npm install -g abcoder-ts-parser）
+TS_TEST_PROJECT="/Users/jiafan/Desktop/poc/opencode"
 
-OUTPUT_BASE_DIR="test-output"
+OUTPUT_BASE_DIR="/Users/jiafan/Desktop/test/output"
 LOCAL_BIN="./abcoder_local"
 
 # ============================================
@@ -152,6 +154,7 @@ get_file_extension() {
         python|py) echo "py" ;;
         rust|rs) echo "rs" ;;
         cpp|cxx|c++) echo "cpp" ;;
+        ts|typescript|js) echo "ts" ;;
         *) echo "$1" ;;
     esac
 }
@@ -208,9 +211,11 @@ show_ast_files() {
     
     if [ -d "$ast_dir" ]; then
         echo "UniAST JSON 文件:"
+        # TypeScript 源在 Go 端生成的文件名为 typescript-repo.json
         local src_ast="$ast_dir/${src_lang}-repo.json"
+        [ "$src_lang" = "ts" ] && src_ast="$ast_dir/typescript-repo.json"
         local dst_ast="$ast_dir/${dst_lang}-repo.json"
-        
+
         if [ -f "$src_ast" ]; then
             local src_size=$(du -h "$src_ast" | cut -f1)
             print_success "源语言 ($src_lang): $src_ast ($src_size)"
@@ -515,6 +520,7 @@ show_usage() {
     echo "  java2python   Java → Python 转换测试"
     echo "  java2rust     Java → Rust 转换测试"
     echo "  java2cpp      Java → C++ 转换测试"
+    echo "  ts2go         TypeScript → Go 转换测试（需 TS_TEST_PROJECT 与 abcoder-ts-parser）"
     echo "  quick         仅运行 Java → Go 快速测试"
     echo ""
     echo "选项:"
@@ -524,6 +530,7 @@ show_usage() {
     echo "示例:"
     echo "  $0              # 运行默认测试 (Java → Go)"
     echo "  $0 all          # 运行所有测试"
+    echo "  $0 ts2go        # TypeScript → Go（项目路径见 TS_TEST_PROJECT）"
     echo "  $0 java2python  # 仅运行 Java → Python 测试"
     echo ""
 }
@@ -546,6 +553,36 @@ test_java2rust() {
 # 运行 Java → C++ 测试
 test_java2cpp() {
     run_translation_test "java" "cxx" "$JAVA_TEST_PROJECT" "$OUTPUT_BASE_DIR/java2cpp"
+}
+
+# 运行 TypeScript → Go 测试（需安装 abcoder-ts-parser）
+test_ts2go() {
+    if [ ! -d "$TS_TEST_PROJECT" ]; then
+        print_warning "TypeScript 测试项目不存在: $TS_TEST_PROJECT"
+        print_info "请设置 TS_TEST_PROJECT 或创建该目录后重试"
+        return 1
+    fi
+
+    if ! command -v abcoder-ts-parser &>/dev/null; then
+        if ! command -v npm &>/dev/null; then
+            print_error "未找到 npm，无法安装 abcoder-ts-parser"
+            print_info "请先安装 Node.js/npm，或手动安装后重试: npm install -g abcoder-ts-parser"
+            return 1
+        fi
+        print_info "正在安装 abcoder-ts-parser..."
+        if ! npm install -g abcoder-ts-parser; then
+            print_error "安装 abcoder-ts-parser 失败"
+            print_info "请手动执行: npm install -g abcoder-ts-parser"
+            return 1
+        fi
+        if ! command -v abcoder-ts-parser &>/dev/null; then
+            print_error "安装后仍未找到 abcoder-ts-parser，请检查 PATH 或手动执行: npm install -g abcoder-ts-parser"
+            return 1
+        fi
+        print_success "abcoder-ts-parser 已安装"
+    fi
+
+    run_translation_test "ts" "go" "$TS_TEST_PROJECT" "$OUTPUT_BASE_DIR/ts2go"
 }
 
 # 运行所有测试
@@ -596,6 +633,20 @@ test_all() {
         print_error "Java → C++ 测试失败"
     fi
 
+    # TypeScript → Go（若 TS_TEST_PROJECT 存在且 abcoder-ts-parser 可用）
+    ((total++))
+    if [ -d "$TS_TEST_PROJECT" ] && command -v abcoder-ts-parser &>/dev/null; then
+        if test_ts2go; then
+            ((passed++))
+            print_success "TypeScript → Go 测试通过"
+        else
+            ((failed++))
+            print_error "TypeScript → Go 测试失败"
+        fi
+    else
+        print_warning "跳过 TypeScript → Go（TS_TEST_PROJECT 不存在或未安装 abcoder-ts-parser）"
+    fi
+
     # 汇总结果
     print_header "测试汇总"
     echo "总计: $total"
@@ -632,7 +683,7 @@ main() {
                 export VERBOSE=1
                 shift
                 ;;
-            all|java2go|java2python|java2rust|java2cpp|quick)
+            all|java2go|java2python|java2rust|java2cpp|ts2go|quick)
                 test_type="$1"
                 shift
                 ;;
@@ -666,6 +717,9 @@ main() {
             ;;
         java2cpp)
             test_java2cpp
+            ;;
+        ts2go)
+            test_ts2go
             ;;
         *)
             print_error "未知测试类型: $test_type"

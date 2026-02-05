@@ -40,6 +40,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -223,7 +224,7 @@ func main() {
 		}
 
 		// Validate source and destination languages
-		supportedSrcLangs := []uniast.Language{uniast.Java, uniast.Golang, uniast.Python, uniast.Rust, uniast.Cxx}
+		supportedSrcLangs := []uniast.Language{uniast.Java, uniast.Golang, uniast.Python, uniast.Rust, uniast.Cxx, uniast.TypeScript}
 		supportedDstLangs := []uniast.Language{uniast.Golang, uniast.Python, uniast.Rust, uniast.Java, uniast.Cxx}
 
 		srcSupported := false
@@ -234,7 +235,7 @@ func main() {
 			}
 		}
 		if !srcSupported {
-			log.Error("Unsupported source language: %s. Supported: java, go, python, rust, cxx\n", srcLang)
+			log.Error("Unsupported source language: %s. Supported: java, go, python, rust, cxx, ts\n", srcLang)
 			os.Exit(1)
 		}
 
@@ -262,6 +263,10 @@ func main() {
 		}
 
 		// Parse source project to UniAST
+		tempASTDir := filepath.Join(os.TempDir(), "abcoder-translate-asts")
+		os.MkdirAll(tempASTDir, 0755)
+		tempASTFile := filepath.Join(tempASTDir, fmt.Sprintf("%s-repo.json", srcLang))
+
 		parseOpts := lang.ParseOptions{
 			CollectOption: collect.CollectOption{
 				Language: srcLang,
@@ -275,27 +280,36 @@ func main() {
 			lspOptions["java.home"] = *javaHome
 		}
 		parseOpts.LspOptions = lspOptions
+		parseOpts.TSConfig = opts.TSConfig
+		parseOpts.TSSrcDir = opts.TSSrcDir
 
-		astJSON, err := lang.Parse(context.Background(), uri, parseOpts)
-		if err != nil {
-			log.Error("Failed to parse %s project: %v\n", srcLang, err)
-			os.Exit(1)
-		}
-
-		// Write AST to temp file for debugging
-		tempASTDir := filepath.Join(os.TempDir(), "abcoder-translate-asts")
-		os.MkdirAll(tempASTDir, 0755)
-		tempASTFile := filepath.Join(tempASTDir, fmt.Sprintf("%s-repo.json", srcLang))
-		if err := utils.MustWriteFile(tempASTFile, astJSON); err != nil {
-			log.Error("Failed to write AST file: %v\n", err)
-			os.Exit(1)
-		}
-
-		// Load source repository
-		srcRepo, err := uniast.LoadRepo(tempASTFile)
-		if err != nil {
-			log.Error("Failed to load %s repository: %v\n", srcLang, err)
-			os.Exit(1)
+		var srcRepo *uniast.Repository
+		if srcLang == uniast.TypeScript {
+			if err := parseTSProject(context.Background(), uri, parseOpts, &tempASTFile); err != nil {
+				log.Error("Failed to parse TypeScript project: %v\n", err)
+				os.Exit(1)
+			}
+			var err error
+			srcRepo, err = uniast.LoadRepo(tempASTFile)
+			if err != nil {
+				log.Error("Failed to load TypeScript repository: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			astJSON, err := lang.Parse(context.Background(), uri, parseOpts)
+			if err != nil {
+				log.Error("Failed to parse %s project: %v\n", srcLang, err)
+				os.Exit(1)
+			}
+			if err := utils.MustWriteFile(tempASTFile, astJSON); err != nil {
+				log.Error("Failed to write AST file: %v\n", err)
+				os.Exit(1)
+			}
+			srcRepo, err = uniast.LoadRepo(tempASTFile)
+			if err != nil {
+				log.Error("Failed to load %s repository: %v\n", srcLang, err)
+				os.Exit(1)
+			}
 		}
 
 		log.Info("%s UniAST generated and saved to: %s\n", srcLang, tempASTFile)
@@ -355,14 +369,20 @@ func main() {
 		}
 
 		// Prepare translation options using new API
+		concurrency := 8
+		if s := os.Getenv("TRANSLATE_CONCURRENCY"); s != "" {
+			if n, err := strconv.Atoi(s); err == nil && n >= 1 && n <= 32 {
+				concurrency = n
+			}
+		}
 		translateOpts := translate.TranslateOptions{
 			SourceLanguage:     srcLang,
 			TargetLanguage:     dstLang,
 			TargetModuleName:   "", // Auto-derive from source
 			OutputDir:          outputDir,
 			LLMTranslator:      llmTranslator,
-			Parallel:           false, // Sequential for better debugging
-			Concurrency:        1,
+			Parallel:           true,
+			Concurrency:        concurrency,
 			WebFramework:       framework,
 			GenerateEntryPoint: !noEntryPoint,
 			GenerateConfig:     !noConfig,
@@ -603,6 +623,7 @@ func parseTSProject(ctx context.Context, repoPath string, opts lang.ParseOptions
 	if *outputFlag != "" {
 		args = append(args, "--output", *outputFlag)
 	}
+	args = append(args, "--monorepo-mode", "combined")
 
 	cmd := exec.CommandContext(ctx, parserPath, args...)
 	cmd.Env = append(os.Environ(), "NODE_OPTIONS=--max-old-space-size=65536")
