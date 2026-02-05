@@ -63,6 +63,7 @@ export BASE_URL="http://10.135.4.11:11434"
 # ============================================
 # 测试数据目录配置
 # ============================================
+# 若项目目录下存在 uniast.json，translate 会直接使用并跳过解析，便于复用（如先 parse 生成后再多次 translate）。
 JAVA_TEST_PROJECT="testdata/java/4_full_maven_repo"
 GO_TEST_PROJECT="testdata/go/0_goland"      # TODO: 添加 Go 测试项目
 PYTHON_TEST_PROJECT="testdata/python/7_reexport"      # TODO: 添加 Python 测试项目

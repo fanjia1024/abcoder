@@ -89,6 +89,8 @@ see [UniAST Specification](docs/uniast-zh.md)
 
 ABCoder can translate code from one language to another using LLM. Supported translation pairs include **Java to Go** and **TypeScript to Go** (and other combinations among Java, Go, Python, Rust, C++).
 
+**Architecture:** The LLM never generates final source code; it only transforms UniAST nodes (Type/Function/Var) into target-language UniAST content. All code emission is deterministic via the Writer. ABCoder uses the LLM only as a UniAST transformer, never as a code generator.
+
 ```bash
 export API_TYPE='{openai|ollama|ark|claude|dashscope|deepseek}' 
 export API_KEY='{your-api-key}' 

@@ -43,7 +43,7 @@ func Translate(ctx context.Context, input interface{}, opts TranslateOptions) er
 	switch v := input.(type) {
 	case string:
 		// Input is a path - could be a directory or a JSON file
-		srcRepo, err = loadRepository(ctx, v, opts.SourceLanguage)
+		srcRepo, err = LoadRepository(ctx, v, opts.SourceLanguage)
 		if err != nil {
 			return fmt.Errorf("load repository failed: %w", err)
 		}
@@ -63,6 +63,11 @@ func Translate(ctx context.Context, input interface{}, opts TranslateOptions) er
 	targetRepo, err := transformer.Transform(ctx, srcRepo)
 	if err != nil {
 		return fmt.Errorf("transform AST failed: %w", err)
+	}
+
+	// Validate target UniAST before writing; reject invalid LLM output to avoid writing bad code
+	if err := uniast.ValidateRepository(targetRepo); err != nil {
+		return fmt.Errorf("UniAST validation failed (rejecting output): %w", err)
 	}
 
 	// Stage 3: Write - Use existing writer to output code
@@ -106,9 +111,10 @@ func validateOptions(opts TranslateOptions) error {
 	return nil
 }
 
-// loadRepository loads a repository from a path
-// The path can be either a directory (to parse) or a JSON file (pre-parsed AST)
-func loadRepository(ctx context.Context, path string, language uniast.Language) (*uniast.Repository, error) {
+// LoadRepository loads a repository from a path.
+// The path can be either a directory (to parse) or a JSON file (pre-parsed AST).
+// Exported for use by pipeline steps.
+func LoadRepository(ctx context.Context, path string, language uniast.Language) (*uniast.Repository, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("path not found: %w", err)

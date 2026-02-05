@@ -284,35 +284,63 @@ func main() {
 		parseOpts.TSSrcDir = opts.TSSrcDir
 
 		var srcRepo *uniast.Repository
-		if srcLang == uniast.TypeScript {
-			if err := parseTSProject(context.Background(), uri, parseOpts, &tempASTFile); err != nil {
-				log.Error("Failed to parse TypeScript project: %v\n", err)
-				os.Exit(1)
+		usedExistingUniAST := false
+		var existingUniASTPath string
+		if stat, err := os.Stat(uri); err == nil {
+			var candidatePath string
+			if stat.IsDir() {
+				candidatePath = filepath.Join(uri, "uniast.json")
+			} else if !stat.IsDir() && strings.HasSuffix(strings.ToLower(uri), ".json") {
+				candidatePath = uri
 			}
-			var err error
-			srcRepo, err = uniast.LoadRepo(tempASTFile)
-			if err != nil {
-				log.Error("Failed to load TypeScript repository: %v\n", err)
-				os.Exit(1)
-			}
-		} else {
-			astJSON, err := lang.Parse(context.Background(), uri, parseOpts)
-			if err != nil {
-				log.Error("Failed to parse %s project: %v\n", srcLang, err)
-				os.Exit(1)
-			}
-			if err := utils.MustWriteFile(tempASTFile, astJSON); err != nil {
-				log.Error("Failed to write AST file: %v\n", err)
-				os.Exit(1)
-			}
-			srcRepo, err = uniast.LoadRepo(tempASTFile)
-			if err != nil {
-				log.Error("Failed to load %s repository: %v\n", srcLang, err)
-				os.Exit(1)
+			if candidatePath != "" {
+				if s, err := os.Stat(candidatePath); err == nil && s != nil && !s.IsDir() {
+					loaded, err := uniast.LoadRepo(candidatePath)
+					if err == nil {
+						srcRepo = loaded
+						usedExistingUniAST = true
+						existingUniASTPath = candidatePath
+						log.Info("Using existing UniAST: %s, skip parsing\n", candidatePath)
+					} else {
+						log.Info("Failed to load existing UniAST, will parse: %v\n", err)
+					}
+				}
 			}
 		}
-
-		log.Info("%s UniAST generated and saved to: %s\n", srcLang, tempASTFile)
+		if !usedExistingUniAST {
+			if srcLang == uniast.TypeScript {
+				if err := parseTSProject(context.Background(), uri, parseOpts, &tempASTFile); err != nil {
+					log.Error("Failed to parse TypeScript project: %v\n", err)
+					os.Exit(1)
+				}
+				var err error
+				srcRepo, err = uniast.LoadRepo(tempASTFile)
+				if err != nil {
+					log.Error("Failed to load TypeScript repository: %v\n", err)
+					os.Exit(1)
+				}
+			} else {
+				astJSON, err := lang.Parse(context.Background(), uri, parseOpts)
+				if err != nil {
+					log.Error("Failed to parse %s project: %v\n", srcLang, err)
+					os.Exit(1)
+				}
+				if err := utils.MustWriteFile(tempASTFile, astJSON); err != nil {
+					log.Error("Failed to write AST file: %v\n", err)
+					os.Exit(1)
+				}
+				srcRepo, err = uniast.LoadRepo(tempASTFile)
+				if err != nil {
+					log.Error("Failed to load %s repository: %v\n", srcLang, err)
+					os.Exit(1)
+				}
+			}
+		}
+		if usedExistingUniAST {
+			log.Info("%s UniAST: %s\n", srcLang, existingUniASTPath)
+		} else {
+			log.Info("%s UniAST generated and saved to: %s\n", srcLang, tempASTFile)
+		}
 
 		// Determine output directory
 		outputDir := ""
@@ -410,6 +438,12 @@ func main() {
 			os.Exit(1)
 		}
 		log.Info("Target UniAST saved to: %s\n", targetASTFile)
+
+		// Validate target UniAST before writing (reject invalid LLM output)
+		if err := uniast.ValidateRepository(targetRepo); err != nil {
+			log.Error("UniAST validation failed (rejecting output): %v\n", err)
+			os.Exit(1)
+		}
 
 		// Write target code using lang.Write
 		err = lang.Write(context.Background(), targetRepo, lang.WriteOptions{
