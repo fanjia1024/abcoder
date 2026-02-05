@@ -448,6 +448,7 @@ func main() {
 				concurrency = n
 			}
 		}
+		translateResult := &translate.TranslateResult{}
 		translateOpts := translate.TranslateOptions{
 			SourceLanguage:     srcLang,
 			TargetLanguage:     dstLang,
@@ -459,6 +460,13 @@ func main() {
 			WebFramework:       framework,
 			GenerateEntryPoint: !noEntryPoint,
 			GenerateConfig:     !noConfig,
+			Result:             translateResult,
+			ProgressCallback: func(done, total int, currentKind, currentNodeID string) {
+				if total > 0 {
+					pct := 100 * float64(done) / float64(total)
+					log.Info("Progress: %d/%d (%.1f%%) current: %s %s\n", done, total, pct, currentKind, currentNodeID)
+				}
+			},
 		}
 
 		// Transform source UniAST to target UniAST with LLM content translation
@@ -541,6 +549,21 @@ func main() {
 			}{RunID: pipelineState.RunID, History: pipelineState.History}
 			if reportJSON, err := json.MarshalIndent(report, "", "  "); err == nil {
 				_ = os.WriteFile(reportPath, reportJSON, 0644)
+			}
+		}
+		// Lightweight checkpoint for future resume: translated_ids + source identifier
+		if outputDir != "" && translateResult.TranslatedIDs != nil {
+			ids := make([]string, 0, len(translateResult.TranslatedIDs))
+			for id := range translateResult.TranslatedIDs {
+				ids = append(ids, id)
+			}
+			sort.Strings(ids)
+			checkpoint := struct {
+				SourcePath    string   `json:"source_path"`
+				TranslatedIDs []string `json:"translated_ids"`
+			}{SourcePath: uri, TranslatedIDs: ids}
+			if checkpointJSON, err := json.MarshalIndent(checkpoint, "", "  "); err == nil {
+				_ = os.WriteFile(filepath.Join(outputDir, "abcoder-translate-checkpoint.json"), checkpointJSON, 0644)
 			}
 		}
 

@@ -54,7 +54,12 @@ type TranslateOptions struct {
 	Result *TranslateResult
 	// AlreadyTranslatedIDs is an optional set of source node IDs to skip (success cache for resume).
 	AlreadyTranslatedIDs map[string]struct{}
+	// ProgressCallback is optional; called after each node is processed (done, total, kind, nodeID) for real-time progress.
+	ProgressCallback ProgressCallbackFunc
 }
+
+// ProgressCallbackFunc is called after each node is processed. done = processed count, total = CountTranslatableNodes, kind = "type"|"func"|"var", nodeID = Identity.Full().
+type ProgressCallbackFunc func(done, total int, currentKind, currentNodeID string)
 
 // FailedNodeInfo records a node that failed translation after max retries.
 type FailedNodeInfo struct {
@@ -64,9 +69,13 @@ type FailedNodeInfo struct {
 }
 
 // TranslateResult is filled by Transform when opts.Result is non-nil (node-granular outcome and cache).
+// TotalNodes and ProcessedNodes are set at end for stats and checkpoint/resume.
 type TranslateResult struct {
-	FailedNodes   []FailedNodeInfo
-	TranslatedIDs map[string]struct{} // source Identity.Full() of successfully translated nodes
+	FailedNodes     []FailedNodeInfo
+	TranslatedIDs   map[string]struct{} // source Identity.Full() of successfully translated nodes
+	TotalNodes      int                 // CountTranslatableNodes at start
+	ProcessedNodes  int                 // done count at end (success + failed)
+	CheckpointPath  string              // reserved: path to checkpoint file for resume
 }
 
 // LLMTranslateFunc is the callback function type for LLM translation
@@ -132,6 +141,42 @@ type TranslateContext struct {
 	mu sync.RWMutex
 	// Result, if non-nil, receives FailedNodes and TranslatedIDs (one node = one retry unit).
 	Result *TranslateResult
+	// Progress is optional; when set, ReportNodeDone is called after each node for real-time progress.
+	Progress *ProgressState
+}
+
+// ProgressState holds total/done and callback for thread-safe progress reporting.
+type ProgressState struct {
+	Total    int
+	done     int
+	mu       sync.Mutex
+	Callback ProgressCallbackFunc
+}
+
+// ReportNodeDone increments done and invokes Callback (if set). Safe for concurrent use.
+func (p *ProgressState) ReportNodeDone(currentKind, currentNodeID string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.done++
+	done := p.done
+	total := p.Total
+	cb := p.Callback
+	p.mu.Unlock()
+	if cb != nil && total > 0 {
+		cb(done, total, currentKind, currentNodeID)
+	}
+}
+
+// Done returns the current processed count. Safe for concurrent use.
+func (p *ProgressState) Done() int {
+	if p == nil {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.done
 }
 
 // NewTranslateContext creates a new TranslateContext

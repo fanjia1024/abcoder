@@ -169,3 +169,32 @@ func inferLanguage(repo *uniast.Repository) uniast.Language {
 	}
 	return uniast.Unknown
 }
+
+// CountTranslatableNodes returns the number of top-level nodes (Types + Functions + Vars)
+// in internal modules only. Used for progress display and resume.
+func CountTranslatableNodes(repo *uniast.Repository) int {
+	if repo == nil || repo.Modules == nil {
+		return 0
+	}
+	var n int
+	for _, mod := range repo.Modules {
+		if mod.IsExternal() || mod.Packages == nil {
+			continue
+		}
+		for _, pkg := range mod.Packages {
+			if pkg == nil {
+				continue
+			}
+			if pkg.Types != nil {
+				n += len(pkg.Types)
+			}
+			if pkg.Functions != nil {
+				n += len(pkg.Functions)
+			}
+			if pkg.Vars != nil {
+				n += len(pkg.Vars)
+			}
+		}
+	}
+	return n
+}

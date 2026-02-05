@@ -82,12 +82,27 @@ func (t *BaseTransformer) Transform(ctx context.Context, src *uniast.Repository)
 		maxRetry = 1
 	}
 
+	// Progress: total nodes and optional callback for real-time progress display
+	total := CountTranslatableNodes(src)
+	initialDone := 0
+	if t.opts.AlreadyTranslatedIDs != nil {
+		initialDone = len(t.opts.AlreadyTranslatedIDs)
+	}
+	var progress *ProgressState
+	if t.opts.ProgressCallback != nil {
+		progress = &ProgressState{Total: total, done: initialDone, Callback: t.opts.ProgressCallback}
+	}
+	if t.opts.Result != nil {
+		t.opts.Result.TotalNodes = total
+	}
+
 	// Global translate context for tracking all translated nodes
 	globalCtx := &TranslateContext{
 		SourceRepo:      src,
 		TargetRepo:      targetRepo,
 		TranslatedNodes: make(map[string]uniast.Identity),
 		Result:          t.opts.Result,
+		Progress:        progress,
 	}
 
 	// 3. Traverse all source modules and merge their packages into the single target module
@@ -115,6 +130,7 @@ func (t *BaseTransformer) Transform(ctx context.Context, src *uniast.Repository)
 				Package:         targetPkg,
 				TranslatedNodes: globalCtx.TranslatedNodes,
 				Result:          globalCtx.Result,
+				Progress:        globalCtx.Progress,
 			}
 
 			// Translate in order: Types -> Functions -> Vars (one node = one retry unit; failures recorded, continue)
@@ -146,6 +162,10 @@ func (t *BaseTransformer) Transform(ctx context.Context, src *uniast.Repository)
 	targetRepo, err := postProcessor.Process(targetRepo)
 	if err != nil {
 		return nil, fmt.Errorf("post-process failed: %w", err)
+	}
+
+	if t.opts.Result != nil && progress != nil {
+		t.opts.Result.ProcessedNodes = progress.Done()
 	}
 
 	return targetRepo, nil
@@ -226,12 +246,18 @@ func (t *BaseTransformer) translateTypesSequential(ctx context.Context, srcPkg, 
 					NodeID: srcType.Identity.Full(), Attempts: maxRetry, Err: err.Error(),
 				})
 			}
+			if tctx.Progress != nil {
+				tctx.Progress.ReportNodeDone("type", srcType.Identity.Full())
+			}
 			continue
 		}
 		targetPkg.Types[targetType.Name] = targetType
 		tctx.AddTranslatedNode(srcType.Identity, targetType.Identity)
 		if tctx.Result != nil {
 			tctx.Result.TranslatedIDs[srcType.Identity.Full()] = struct{}{}
+		}
+		if tctx.Progress != nil {
+			tctx.Progress.ReportNodeDone("type", srcType.Identity.Full())
 		}
 	}
 }
@@ -264,6 +290,9 @@ func (t *BaseTransformer) translateTypesParallel(ctx context.Context, srcPkg, ta
 					})
 					mu.Unlock()
 				}
+				if tctx.Progress != nil {
+					tctx.Progress.ReportNodeDone("type", srcType.Identity.Full())
+				}
 				return
 			}
 			mu.Lock()
@@ -273,6 +302,9 @@ func (t *BaseTransformer) translateTypesParallel(ctx context.Context, srcPkg, ta
 				tctx.Result.TranslatedIDs[srcType.Identity.Full()] = struct{}{}
 			}
 			mu.Unlock()
+			if tctx.Progress != nil {
+				tctx.Progress.ReportNodeDone("type", srcType.Identity.Full())
+			}
 		}(srcType)
 	}
 	wg.Wait()
@@ -308,12 +340,18 @@ func (t *BaseTransformer) translateFunctionsSequential(ctx context.Context, srcP
 					NodeID: srcFunc.Identity.Full(), Attempts: maxRetry, Err: err.Error(),
 				})
 			}
+			if tctx.Progress != nil {
+				tctx.Progress.ReportNodeDone("func", srcFunc.Identity.Full())
+			}
 			continue
 		}
 		targetPkg.Functions[targetFunc.Name] = targetFunc
 		tctx.AddTranslatedNode(srcFunc.Identity, targetFunc.Identity)
 		if tctx.Result != nil {
 			tctx.Result.TranslatedIDs[srcFunc.Identity.Full()] = struct{}{}
+		}
+		if tctx.Progress != nil {
+			tctx.Progress.ReportNodeDone("func", srcFunc.Identity.Full())
 		}
 	}
 }
@@ -346,6 +384,9 @@ func (t *BaseTransformer) translateFunctionsParallel(ctx context.Context, srcPkg
 					})
 					mu.Unlock()
 				}
+				if tctx.Progress != nil {
+					tctx.Progress.ReportNodeDone("func", srcFunc.Identity.Full())
+				}
 				return
 			}
 			mu.Lock()
@@ -355,6 +396,9 @@ func (t *BaseTransformer) translateFunctionsParallel(ctx context.Context, srcPkg
 				tctx.Result.TranslatedIDs[srcFunc.Identity.Full()] = struct{}{}
 			}
 			mu.Unlock()
+			if tctx.Progress != nil {
+				tctx.Progress.ReportNodeDone("func", srcFunc.Identity.Full())
+			}
 		}(srcFunc)
 	}
 	wg.Wait()
@@ -390,12 +434,18 @@ func (t *BaseTransformer) translateVarsSequential(ctx context.Context, srcPkg, t
 					NodeID: srcVar.Identity.Full(), Attempts: maxRetry, Err: err.Error(),
 				})
 			}
+			if tctx.Progress != nil {
+				tctx.Progress.ReportNodeDone("var", srcVar.Identity.Full())
+			}
 			continue
 		}
 		targetPkg.Vars[targetVar.Name] = targetVar
 		tctx.AddTranslatedNode(srcVar.Identity, targetVar.Identity)
 		if tctx.Result != nil {
 			tctx.Result.TranslatedIDs[srcVar.Identity.Full()] = struct{}{}
+		}
+		if tctx.Progress != nil {
+			tctx.Progress.ReportNodeDone("var", srcVar.Identity.Full())
 		}
 	}
 }
@@ -428,6 +478,9 @@ func (t *BaseTransformer) translateVarsParallel(ctx context.Context, srcPkg, tar
 					})
 					mu.Unlock()
 				}
+				if tctx.Progress != nil {
+					tctx.Progress.ReportNodeDone("var", srcVar.Identity.Full())
+				}
 				return
 			}
 			mu.Lock()
@@ -437,6 +490,9 @@ func (t *BaseTransformer) translateVarsParallel(ctx context.Context, srcPkg, tar
 				tctx.Result.TranslatedIDs[srcVar.Identity.Full()] = struct{}{}
 			}
 			mu.Unlock()
+			if tctx.Progress != nil {
+				tctx.Progress.ReportNodeDone("var", srcVar.Identity.Full())
+			}
 		}(srcVar)
 	}
 	wg.Wait()
