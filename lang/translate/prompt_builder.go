@@ -59,6 +59,9 @@ func (b *PromptBuilder) BuildTypePrompt(req *LLMTranslateRequest) string {
 
 	// Add source code
 	sb.WriteString("## Source Code\n")
+	if req.SourceTruncated {
+		sb.WriteString("Note: Source was truncated for context limit; translate the visible part only.\n\n")
+	}
 	sb.WriteString("```")
 	sb.WriteString(string(b.source))
 	sb.WriteString("\n")
@@ -97,6 +100,9 @@ func (b *PromptBuilder) BuildFunctionPrompt(req *LLMTranslateRequest) string {
 
 	// Add source code
 	sb.WriteString("## Source Code\n")
+	if req.SourceTruncated {
+		sb.WriteString("Note: Source was truncated for context limit; translate the visible part only.\n\n")
+	}
 	sb.WriteString("```")
 	sb.WriteString(string(b.source))
 	sb.WriteString("\n")
@@ -135,6 +141,9 @@ func (b *PromptBuilder) BuildVarPrompt(req *LLMTranslateRequest) string {
 
 	// Add source code
 	sb.WriteString("## Source Code\n")
+	if req.SourceTruncated {
+		sb.WriteString("Note: Source was truncated for context limit; translate the visible part only.\n\n")
+	}
 	sb.WriteString("```")
 	sb.WriteString(string(b.source))
 	sb.WriteString("\n")

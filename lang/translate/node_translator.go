@@ -26,6 +26,33 @@ import (
 	"github.com/cloudwego/abcoder/lang/uniast"
 )
 
+const truncateSuffix = "\n// ... [truncated for context limit]"
+
+// truncateSourceForPrompt truncates content to at most maxChars runes, preferring a line boundary.
+// Returns (truncatedContent, true) if truncated, (content, false) otherwise. If maxChars <= 0, returns (content, false).
+func truncateSourceForPrompt(content string, maxChars int) (string, bool) {
+	if maxChars <= 0 {
+		return content, false
+	}
+	runes := []rune(content)
+	if len(runes) <= maxChars {
+		return content, false
+	}
+	prefix := runes[:maxChars]
+	lastNewline := -1
+	for i := len(prefix) - 1; i >= 0; i-- {
+		if prefix[i] == '\n' {
+			lastNewline = i
+			break
+		}
+	}
+	cut := maxChars
+	if lastNewline >= 0 {
+		cut = lastNewline + 1
+	}
+	return string(prefix[:cut]) + truncateSuffix, true
+}
+
 // NodeTranslator handles translation of individual AST nodes
 type NodeTranslator struct {
 	opts          TranslateOptions
@@ -45,14 +72,16 @@ func NewNodeTranslator(opts TranslateOptions, typeHints *TypeHints) *NodeTransla
 // TranslateType translates a Type node
 func (t *NodeTranslator) TranslateType(ctx context.Context, src *uniast.Type, tctx *TranslateContext) (*uniast.Type, error) {
 	// 1. Build LLM request
+	sourceContent, truncated := truncateSourceForPrompt(src.Content, t.opts.MaxSourceChars)
 	req := &LLMTranslateRequest{
-		SourceLanguage: t.opts.SourceLanguage,
-		TargetLanguage: t.opts.TargetLanguage,
-		NodeType:       uniast.TYPE,
-		SourceContent:  src.Content,
-		Identity:       src.Identity,
-		TypeHints:      t.typeHints,
-		Dependencies:   t.collectDependencyHints(src.Identity, tctx),
+		SourceLanguage:  t.opts.SourceLanguage,
+		TargetLanguage:  t.opts.TargetLanguage,
+		NodeType:        uniast.TYPE,
+		SourceContent:   sourceContent,
+		SourceTruncated: truncated,
+		Identity:        src.Identity,
+		TypeHints:       t.typeHints,
+		Dependencies:    t.collectDependencyHints(src.Identity, tctx),
 	}
 	req.Prompt = t.promptBuilder.BuildTypePrompt(req)
 
@@ -88,14 +117,16 @@ func (t *NodeTranslator) TranslateType(ctx context.Context, src *uniast.Type, tc
 // TranslateFunction translates a Function node
 func (t *NodeTranslator) TranslateFunction(ctx context.Context, src *uniast.Function, tctx *TranslateContext) (*uniast.Function, error) {
 	// 1. Build LLM request
+	sourceContent, truncated := truncateSourceForPrompt(src.Content, t.opts.MaxSourceChars)
 	req := &LLMTranslateRequest{
-		SourceLanguage: t.opts.SourceLanguage,
-		TargetLanguage: t.opts.TargetLanguage,
-		NodeType:       uniast.FUNC,
-		SourceContent:  src.Content,
-		Identity:       src.Identity,
-		TypeHints:      t.typeHints,
-		Dependencies:   t.collectDependencyHints(src.Identity, tctx),
+		SourceLanguage:  t.opts.SourceLanguage,
+		TargetLanguage:  t.opts.TargetLanguage,
+		NodeType:        uniast.FUNC,
+		SourceContent:   sourceContent,
+		SourceTruncated: truncated,
+		Identity:        src.Identity,
+		TypeHints:       t.typeHints,
+		Dependencies:    t.collectDependencyHints(src.Identity, tctx),
 	}
 	req.Prompt = t.promptBuilder.BuildFunctionPrompt(req)
 
@@ -133,14 +164,16 @@ func (t *NodeTranslator) TranslateFunction(ctx context.Context, src *uniast.Func
 // TranslateVar translates a Var node
 func (t *NodeTranslator) TranslateVar(ctx context.Context, src *uniast.Var, tctx *TranslateContext) (*uniast.Var, error) {
 	// 1. Build LLM request
+	sourceContent, truncated := truncateSourceForPrompt(src.Content, t.opts.MaxSourceChars)
 	req := &LLMTranslateRequest{
-		SourceLanguage: t.opts.SourceLanguage,
-		TargetLanguage: t.opts.TargetLanguage,
-		NodeType:       uniast.VAR,
-		SourceContent:  src.Content,
-		Identity:       src.Identity,
-		TypeHints:      t.typeHints,
-		Dependencies:   t.collectDependencyHints(src.Identity, tctx),
+		SourceLanguage:  t.opts.SourceLanguage,
+		TargetLanguage:  t.opts.TargetLanguage,
+		NodeType:        uniast.VAR,
+		SourceContent:   sourceContent,
+		SourceTruncated: truncated,
+		Identity:        src.Identity,
+		TypeHints:       t.typeHints,
+		Dependencies:    t.collectDependencyHints(src.Identity, tctx),
 	}
 	req.Prompt = t.promptBuilder.BuildVarPrompt(req)
 
@@ -201,6 +234,9 @@ func (t *NodeTranslator) collectDependencyHints(srcID uniast.Identity, tctx *Tra
 		}
 	}
 
+	if t.opts.MaxDependenciesInPrompt > 0 && len(hints) > t.opts.MaxDependenciesInPrompt {
+		hints = hints[:t.opts.MaxDependenciesInPrompt]
+	}
 	return hints
 }
 

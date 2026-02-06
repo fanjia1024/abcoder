@@ -27,16 +27,16 @@ NC='\033[0m' # No Color
 #   - ollama     (本地模型)
 
 # --- DashScope (通义千问) ---
-# export API_TYPE="dashscope"
-# export API_KEY="sk-810e9c55ef5948f58837c90eed07b8bc"
-# export MODEL_NAME="qwen3-max"
+export API_TYPE="dashscope"
+export API_KEY="sk-810e9c55ef5948f58837c90eed07b8bc"
+export MODEL_NAME="qwen3-coder-plus"
 # export BASE_URL=""  # 可选，使用默认值
 
 # --- OpenAI ---
 # export API_TYPE="openai"
-# export API_KEY="sk-your-openai-api-key"
-# export MODEL_NAME="gpt-4o"
-# export BASE_URL="https://api.openai.com/v1"
+# export API_KEY="empty"
+# export MODEL_NAME="openai/gpt-oss-20b"
+# export BASE_URL="http://localhost:1234/v1"
 
 # --- Claude ---
 # export API_TYPE="claude"
@@ -55,22 +55,23 @@ NC='\033[0m' # No Color
 # export MODEL_NAME="your-endpoint-id"
 
 # --- Ollama (本地模型) ---
-export API_TYPE="ollama"
-export API_KEY="demo"
-export MODEL_NAME="gpt-oss:120b"
-export BASE_URL="http://10.135.4.11:11434"
+# export API_TYPE="ollama"
+# export API_KEY="demo"
+# export MODEL_NAME="gpt-oss:120b"
+# export BASE_URL="http://10.135.4.11:11434"
 
 # ============================================
 # 测试数据目录配置
 # ============================================
 # 若项目目录下存在 uniast.json，translate 会直接使用并跳过解析，便于复用（如先 parse 生成后再多次 translate）。
+# 大仓库加速：可设置 TRANSLATE_CONCURRENCY=32 或更高（默认 16，上限 128）、TRANSLATE_PACKAGE_CONCURRENCY=4 或 8 启用多包并行。
 JAVA_TEST_PROJECT="testdata/java/4_full_maven_repo"
 GO_TEST_PROJECT="testdata/go/0_goland"      # TODO: 添加 Go 测试项目
 PYTHON_TEST_PROJECT="testdata/python/7_reexport"      # TODO: 添加 Python 测试项目
 RUST_TEST_PROJECT="testdata/rust/1_simpleobj"          # TODO: 添加 Rust 测试项目
 # TypeScript 项目路径（需已安装 abcoder-ts-parser: npm install -g abcoder-ts-parser）
 TS_TEST_PROJECT="/Users/jiafan/Desktop/poc/opencode"
-
+TRANSLATE_CONCURRENCY=32
 OUTPUT_BASE_DIR="/Users/jiafan/Desktop/test/output"
 LOCAL_BIN="./abcoder_local"
 

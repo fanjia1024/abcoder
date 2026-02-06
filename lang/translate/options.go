@@ -37,8 +37,16 @@ type TranslateOptions struct {
 	LLMTranslator LLMTranslateFunc
 	// Parallel enables parallel translation (default: false)
 	Parallel bool
-	// Concurrency specifies the number of concurrent translations
+	// Concurrency specifies the number of concurrent translations per package
 	Concurrency int
+	// PackageConcurrency limits how many packages are translated at once (default: 1 = sequential packages).
+	// Set to 4 or 8 for cross-package parallelism; total LLM concurrency ~ PackageConcurrency * Concurrency.
+	PackageConcurrency int
+
+	// MaxDependenciesInPrompt caps the number of dependency hints in each prompt (0 = no limit). Reduces context overflow.
+	MaxDependenciesInPrompt int
+	// MaxSourceChars truncates source code in the prompt when exceeded (0 = no limit). Reduces context overflow and latency.
+	MaxSourceChars int
 
 	// Post-processing options
 	// WebFramework specifies the web framework to integrate: "gin", "echo", "actix", "fastapi", "none"
@@ -98,6 +106,8 @@ type LLMTranslateRequest struct {
 	TypeHints *TypeHints
 	// Dependencies contains information about already translated dependencies
 	Dependencies []DependencyHint
+	// SourceTruncated is set when SourceContent was truncated for context limit; PromptBuilder may add a note.
+	SourceTruncated bool
 	// Prompt is the complete prompt built by PromptBuilder
 	Prompt string
 }

@@ -442,22 +442,34 @@ func main() {
 		}
 
 		// Prepare translation options using new API
-		concurrency := 8
+		concurrency := 16
 		if s := os.Getenv("TRANSLATE_CONCURRENCY"); s != "" {
-			if n, err := strconv.Atoi(s); err == nil && n >= 1 && n <= 32 {
+			if n, err := strconv.Atoi(s); err == nil && n >= 1 && n <= 128 {
 				concurrency = n
 			}
 		}
+		packageConcurrency := 1
+		if s := os.Getenv("TRANSLATE_PACKAGE_CONCURRENCY"); s != "" {
+			if n, err := strconv.Atoi(s); err == nil && n >= 1 && n <= 16 {
+				packageConcurrency = n
+			}
+		}
+		if packageConcurrency == 1 && translate.CountTranslatableNodes(srcRepo) > 500 {
+			packageConcurrency = 4
+		}
 		translateResult := &translate.TranslateResult{}
 		translateOpts := translate.TranslateOptions{
-			SourceLanguage:     srcLang,
-			TargetLanguage:     dstLang,
-			TargetModuleName:   "", // Auto-derive from source
-			OutputDir:          outputDir,
-			LLMTranslator:      llmTranslator,
-			Parallel:           true,
-			Concurrency:        concurrency,
-			WebFramework:       framework,
+			SourceLanguage:           srcLang,
+			TargetLanguage:           dstLang,
+			TargetModuleName:         "", // Auto-derive from source
+			OutputDir:                outputDir,
+			LLMTranslator:           llmTranslator,
+			Parallel:                 true,
+			Concurrency:              concurrency,
+			PackageConcurrency:       packageConcurrency,
+			MaxDependenciesInPrompt:  25,
+			MaxSourceChars:           12000,
+			WebFramework:             framework,
 			GenerateEntryPoint: !noEntryPoint,
 			GenerateConfig:     !noConfig,
 			Result:             translateResult,

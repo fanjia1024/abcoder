@@ -106,40 +106,80 @@ func (t *BaseTransformer) Transform(ctx context.Context, src *uniast.Repository)
 	}
 
 	// 3. Traverse all source modules and merge their packages into the single target module
+	packageConcurrency := t.opts.PackageConcurrency
+	if packageConcurrency < 1 {
+		packageConcurrency = 1
+	}
+	var packagesMu sync.Mutex // protects targetMod.Packages when PackageConcurrency > 1
+
+	runOnePackage := func(pkgPath uniast.PkgPath, srcPkg *uniast.Package, targetPkgPath string) {
+		// Get or create target package (under lock when parallel packages)
+		packagesMu.Lock()
+		targetPkg, exists := targetMod.Packages[uniast.PkgPath(targetPkgPath)]
+		if !exists {
+			targetPkg = t.structAdapter.AdaptPackage(srcPkg)
+			targetPkg.PkgPath = uniast.PkgPath(targetPkgPath)
+		}
+		packagesMu.Unlock()
+
+		pkgCtx := &TranslateContext{
+			SourceRepo:      src,
+			TargetRepo:      targetRepo,
+			Module:          targetMod,
+			Package:         targetPkg,
+			TranslatedNodes: globalCtx.TranslatedNodes,
+			Result:          globalCtx.Result,
+			Progress:        globalCtx.Progress,
+		}
+		t.translateTypes(ctx, srcPkg, targetPkg, pkgCtx, maxRetry)
+		t.translateFunctions(ctx, srcPkg, targetPkg, pkgCtx, maxRetry)
+		t.translateVars(ctx, srcPkg, targetPkg, pkgCtx, maxRetry)
+
+		packagesMu.Lock()
+		targetMod.Packages[uniast.PkgPath(targetPkgPath)] = targetPkg
+		packagesMu.Unlock()
+	}
+
 	for _, srcMod := range src.Modules {
 		if srcMod.IsExternal() {
 			continue
 		}
 
-		for pkgPath, srcPkg := range srcMod.Packages {
-			// Convert package path for target language (flat structure)
-			targetPkgPath := t.structAdapter.convertPackagePath(string(pkgPath))
-
-			// Check if package already exists (from another source module)
-			targetPkg, exists := targetMod.Packages[uniast.PkgPath(targetPkgPath)]
-			if !exists {
-				targetPkg = t.structAdapter.AdaptPackage(srcPkg)
-				targetPkg.PkgPath = uniast.PkgPath(targetPkgPath)
+		if packageConcurrency <= 1 {
+			for pkgPath, srcPkg := range srcMod.Packages {
+				targetPkgPath := t.structAdapter.convertPackagePath(string(pkgPath))
+				runOnePackage(pkgPath, srcPkg, targetPkgPath)
 			}
-
-			// Create package-level context
-			pkgCtx := &TranslateContext{
-				SourceRepo:      src,
-				TargetRepo:      targetRepo,
-				Module:          targetMod,
-				Package:         targetPkg,
-				TranslatedNodes: globalCtx.TranslatedNodes,
-				Result:          globalCtx.Result,
-				Progress:        globalCtx.Progress,
-			}
-
-			// Translate in order: Types -> Functions -> Vars (one node = one retry unit; failures recorded, continue)
-			t.translateTypes(ctx, srcPkg, targetPkg, pkgCtx, maxRetry)
-			t.translateFunctions(ctx, srcPkg, targetPkg, pkgCtx, maxRetry)
-			t.translateVars(ctx, srcPkg, targetPkg, pkgCtx, maxRetry)
-
-			targetMod.Packages[uniast.PkgPath(targetPkgPath)] = targetPkg
+			continue
 		}
+
+		// Collect packages then process with limited concurrency
+		type pkgWork struct {
+			pkgPath       uniast.PkgPath
+			srcPkg        *uniast.Package
+			targetPkgPath string
+		}
+		var work []pkgWork
+		for pkgPath, srcPkg := range srcMod.Packages {
+			work = append(work, pkgWork{
+				pkgPath:       pkgPath,
+				srcPkg:        srcPkg,
+				targetPkgPath: t.structAdapter.convertPackagePath(string(pkgPath)),
+			})
+		}
+		sem := make(chan struct{}, packageConcurrency)
+		var wg sync.WaitGroup
+		for _, w := range work {
+			w := w
+			wg.Add(1)
+			sem <- struct{}{}
+			go func() {
+				defer wg.Done()
+				defer func() { <-sem }()
+				runOnePackage(w.pkgPath, w.srcPkg, w.targetPkgPath)
+			}()
+		}
+		wg.Wait()
 	}
 
 	// 4. Add the single merged module to the repository
@@ -263,50 +303,68 @@ func (t *BaseTransformer) translateTypesSequential(ctx context.Context, srcPkg, 
 }
 
 func (t *BaseTransformer) translateTypesParallel(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext, maxRetry int) {
+	var work []*uniast.Type
+	for _, srcType := range srcPkg.Types {
+		if tctx.Result != nil && t.opts.AlreadyTranslatedIDs != nil {
+			if _, ok := t.opts.AlreadyTranslatedIDs[srcType.Identity.Full()]; ok {
+				continue
+			}
+		}
+		work = append(work, srcType)
+	}
+	if len(work) == 0 {
+		return
+	}
+	workCh := make(chan *uniast.Type, t.opts.Concurrency)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	semaphore := make(chan struct{}, t.opts.Concurrency)
-
-	for _, srcType := range srcPkg.Types {
+	nWorkers := t.opts.Concurrency
+	if nWorkers > len(work) {
+		nWorkers = len(work)
+	}
+	for i := 0; i < nWorkers; i++ {
 		wg.Add(1)
-		go func(srcType *uniast.Type) {
+		go func() {
 			defer wg.Done()
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-
-			var targetType *uniast.Type
-			var err error
-			for attempt := 0; attempt < maxRetry; attempt++ {
-				targetType, err = t.nodeTranslator.TranslateType(ctx, srcType, tctx)
-				if err == nil {
-					break
+			for srcType := range workCh {
+				var targetType *uniast.Type
+				var err error
+				for attempt := 0; attempt < maxRetry; attempt++ {
+					targetType, err = t.nodeTranslator.TranslateType(ctx, srcType, tctx)
+					if err == nil {
+						break
+					}
 				}
-			}
-			if err != nil {
+				if err != nil {
+					if tctx.Result != nil {
+						mu.Lock()
+						tctx.Result.FailedNodes = append(tctx.Result.FailedNodes, FailedNodeInfo{
+							NodeID: srcType.Identity.Full(), Attempts: maxRetry, Err: err.Error(),
+						})
+						mu.Unlock()
+					}
+					if tctx.Progress != nil {
+						tctx.Progress.ReportNodeDone("type", srcType.Identity.Full())
+					}
+					continue
+				}
+				mu.Lock()
+				targetPkg.Types[targetType.Name] = targetType
+				tctx.AddTranslatedNode(srcType.Identity, targetType.Identity)
 				if tctx.Result != nil {
-					mu.Lock()
-					tctx.Result.FailedNodes = append(tctx.Result.FailedNodes, FailedNodeInfo{
-						NodeID: srcType.Identity.Full(), Attempts: maxRetry, Err: err.Error(),
-					})
-					mu.Unlock()
+					tctx.Result.TranslatedIDs[srcType.Identity.Full()] = struct{}{}
 				}
+				mu.Unlock()
 				if tctx.Progress != nil {
 					tctx.Progress.ReportNodeDone("type", srcType.Identity.Full())
 				}
-				return
 			}
-			mu.Lock()
-			targetPkg.Types[targetType.Name] = targetType
-			tctx.AddTranslatedNode(srcType.Identity, targetType.Identity)
-			if tctx.Result != nil {
-				tctx.Result.TranslatedIDs[srcType.Identity.Full()] = struct{}{}
-			}
-			mu.Unlock()
-			if tctx.Progress != nil {
-				tctx.Progress.ReportNodeDone("type", srcType.Identity.Full())
-			}
-		}(srcType)
+		}()
 	}
+	for _, srcType := range work {
+		workCh <- srcType
+	}
+	close(workCh)
 	wg.Wait()
 }
 
@@ -357,50 +415,68 @@ func (t *BaseTransformer) translateFunctionsSequential(ctx context.Context, srcP
 }
 
 func (t *BaseTransformer) translateFunctionsParallel(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext, maxRetry int) {
+	var work []*uniast.Function
+	for _, srcFunc := range srcPkg.Functions {
+		if tctx.Result != nil && t.opts.AlreadyTranslatedIDs != nil {
+			if _, ok := t.opts.AlreadyTranslatedIDs[srcFunc.Identity.Full()]; ok {
+				continue
+			}
+		}
+		work = append(work, srcFunc)
+	}
+	if len(work) == 0 {
+		return
+	}
+	workCh := make(chan *uniast.Function, t.opts.Concurrency)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	semaphore := make(chan struct{}, t.opts.Concurrency)
-
-	for _, srcFunc := range srcPkg.Functions {
+	nWorkers := t.opts.Concurrency
+	if nWorkers > len(work) {
+		nWorkers = len(work)
+	}
+	for i := 0; i < nWorkers; i++ {
 		wg.Add(1)
-		go func(srcFunc *uniast.Function) {
+		go func() {
 			defer wg.Done()
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-
-			var targetFunc *uniast.Function
-			var err error
-			for attempt := 0; attempt < maxRetry; attempt++ {
-				targetFunc, err = t.nodeTranslator.TranslateFunction(ctx, srcFunc, tctx)
-				if err == nil {
-					break
+			for srcFunc := range workCh {
+				var targetFunc *uniast.Function
+				var err error
+				for attempt := 0; attempt < maxRetry; attempt++ {
+					targetFunc, err = t.nodeTranslator.TranslateFunction(ctx, srcFunc, tctx)
+					if err == nil {
+						break
+					}
 				}
-			}
-			if err != nil {
+				if err != nil {
+					if tctx.Result != nil {
+						mu.Lock()
+						tctx.Result.FailedNodes = append(tctx.Result.FailedNodes, FailedNodeInfo{
+							NodeID: srcFunc.Identity.Full(), Attempts: maxRetry, Err: err.Error(),
+						})
+						mu.Unlock()
+					}
+					if tctx.Progress != nil {
+						tctx.Progress.ReportNodeDone("func", srcFunc.Identity.Full())
+					}
+					continue
+				}
+				mu.Lock()
+				targetPkg.Functions[targetFunc.Name] = targetFunc
+				tctx.AddTranslatedNode(srcFunc.Identity, targetFunc.Identity)
 				if tctx.Result != nil {
-					mu.Lock()
-					tctx.Result.FailedNodes = append(tctx.Result.FailedNodes, FailedNodeInfo{
-						NodeID: srcFunc.Identity.Full(), Attempts: maxRetry, Err: err.Error(),
-					})
-					mu.Unlock()
+					tctx.Result.TranslatedIDs[srcFunc.Identity.Full()] = struct{}{}
 				}
+				mu.Unlock()
 				if tctx.Progress != nil {
 					tctx.Progress.ReportNodeDone("func", srcFunc.Identity.Full())
 				}
-				return
 			}
-			mu.Lock()
-			targetPkg.Functions[targetFunc.Name] = targetFunc
-			tctx.AddTranslatedNode(srcFunc.Identity, targetFunc.Identity)
-			if tctx.Result != nil {
-				tctx.Result.TranslatedIDs[srcFunc.Identity.Full()] = struct{}{}
-			}
-			mu.Unlock()
-			if tctx.Progress != nil {
-				tctx.Progress.ReportNodeDone("func", srcFunc.Identity.Full())
-			}
-		}(srcFunc)
+		}()
 	}
+	for _, srcFunc := range work {
+		workCh <- srcFunc
+	}
+	close(workCh)
 	wg.Wait()
 }
 
@@ -451,49 +527,67 @@ func (t *BaseTransformer) translateVarsSequential(ctx context.Context, srcPkg, t
 }
 
 func (t *BaseTransformer) translateVarsParallel(ctx context.Context, srcPkg, targetPkg *uniast.Package, tctx *TranslateContext, maxRetry int) {
+	var work []*uniast.Var
+	for _, srcVar := range srcPkg.Vars {
+		if tctx.Result != nil && t.opts.AlreadyTranslatedIDs != nil {
+			if _, ok := t.opts.AlreadyTranslatedIDs[srcVar.Identity.Full()]; ok {
+				continue
+			}
+		}
+		work = append(work, srcVar)
+	}
+	if len(work) == 0 {
+		return
+	}
+	workCh := make(chan *uniast.Var, t.opts.Concurrency)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	semaphore := make(chan struct{}, t.opts.Concurrency)
-
-	for _, srcVar := range srcPkg.Vars {
+	nWorkers := t.opts.Concurrency
+	if nWorkers > len(work) {
+		nWorkers = len(work)
+	}
+	for i := 0; i < nWorkers; i++ {
 		wg.Add(1)
-		go func(srcVar *uniast.Var) {
+		go func() {
 			defer wg.Done()
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-
-			var targetVar *uniast.Var
-			var err error
-			for attempt := 0; attempt < maxRetry; attempt++ {
-				targetVar, err = t.nodeTranslator.TranslateVar(ctx, srcVar, tctx)
-				if err == nil {
-					break
+			for srcVar := range workCh {
+				var targetVar *uniast.Var
+				var err error
+				for attempt := 0; attempt < maxRetry; attempt++ {
+					targetVar, err = t.nodeTranslator.TranslateVar(ctx, srcVar, tctx)
+					if err == nil {
+						break
+					}
 				}
-			}
-			if err != nil {
+				if err != nil {
+					if tctx.Result != nil {
+						mu.Lock()
+						tctx.Result.FailedNodes = append(tctx.Result.FailedNodes, FailedNodeInfo{
+							NodeID: srcVar.Identity.Full(), Attempts: maxRetry, Err: err.Error(),
+						})
+						mu.Unlock()
+					}
+					if tctx.Progress != nil {
+						tctx.Progress.ReportNodeDone("var", srcVar.Identity.Full())
+					}
+					continue
+				}
+				mu.Lock()
+				targetPkg.Vars[targetVar.Name] = targetVar
+				tctx.AddTranslatedNode(srcVar.Identity, targetVar.Identity)
 				if tctx.Result != nil {
-					mu.Lock()
-					tctx.Result.FailedNodes = append(tctx.Result.FailedNodes, FailedNodeInfo{
-						NodeID: srcVar.Identity.Full(), Attempts: maxRetry, Err: err.Error(),
-					})
-					mu.Unlock()
+					tctx.Result.TranslatedIDs[srcVar.Identity.Full()] = struct{}{}
 				}
+				mu.Unlock()
 				if tctx.Progress != nil {
 					tctx.Progress.ReportNodeDone("var", srcVar.Identity.Full())
 				}
-				return
 			}
-			mu.Lock()
-			targetPkg.Vars[targetVar.Name] = targetVar
-			tctx.AddTranslatedNode(srcVar.Identity, targetVar.Identity)
-			if tctx.Result != nil {
-				tctx.Result.TranslatedIDs[srcVar.Identity.Full()] = struct{}{}
-			}
-			mu.Unlock()
-			if tctx.Progress != nil {
-				tctx.Progress.ReportNodeDone("var", srcVar.Identity.Full())
-			}
-		}(srcVar)
+		}()
 	}
+	for _, srcVar := range work {
+		workCh <- srcVar
+	}
+	close(workCh)
 	wg.Wait()
 }
